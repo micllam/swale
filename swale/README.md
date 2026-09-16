@@ -1,5 +1,9 @@
 # swale
 
+[![crates.io](https://img.shields.io/crates/v/swale.svg)](https://crates.io/crates/swale)
+[![docs.rs](https://img.shields.io/docsrs/swale)](https://docs.rs/swale)
+[![license](https://img.shields.io/crates/l/swale.svg)](#license)
+
 A scheduled, dependency-ordered orchestrator of asset graphs.
 
 swale runs on the [taquba](https://github.com/micllam/taquba) durable

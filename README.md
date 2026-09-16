@@ -1,6 +1,9 @@
 # swale
 
+[![crates.io](https://img.shields.io/crates/v/swale.svg)](https://crates.io/crates/swale)
+[![docs.rs](https://img.shields.io/docsrs/swale)](https://docs.rs/swale)
 [![CI](https://github.com/micllam/swale/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/micllam/swale/actions/workflows/ci.yml)
+[![license](https://img.shields.io/crates/l/swale.svg)](#license)
 
 A scheduled, dependency-ordered orchestrator of asset graphs. The deployment
 consists of a single binary and a single bucket.
