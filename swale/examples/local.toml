@@ -1,0 +1,23 @@
+# A graph of two shell nodes that runs anywhere `sh` exists:
+#
+#     swale run examples/local.toml --store ./swale-store
+#
+# `first` prints an output, and `second` receives it through a template.
+
+[graph]
+name = "local"
+
+[[node]]
+name = "first"
+produces = "first"
+operator = "subprocess"
+[node.params]
+argv = ["sh", "-c", "cat >/dev/null; printf '{\"n\": 1}'"]
+
+[[node]]
+name = "second"
+produces = "second"
+consumes = ["first"]
+operator = "subprocess"
+[node.params]
+argv = ["sh", "-c", "cat >/dev/null; printf '{\"n\": %s}' \"$0\"", "{{ upstream.first.n }}"]

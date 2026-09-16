@@ -1,0 +1,47 @@
+[graph]
+name = "orders_daily"
+schedule = "0 2 * * *"
+catchup = "7d"
+partition = "daily"
+
+[[node]]
+name = "extract"
+produces = "orders_raw"
+operator = "subprocess"
+pool = "default"
+retries = 3
+[node.params]
+argv = ["python", "tasks/extract.py"]
+
+[[node]]
+name = "transform"
+produces = "orders_clean"
+consumes = ["orders_raw"]
+operator = "subprocess"
+[node.params]
+argv = ["python", "tasks/transform.py"]
+
+[[node]]
+name = "load"
+produces = "orders_warehouse"
+consumes = ["orders_clean"]
+operator = "subprocess"
+pool = "warehouse"
+retries = 5
+[node.params]
+argv = ["python", "tasks/load.py", "{{ upstream.transform.rows_key }}"]
+
+[[node]]
+name = "partition_ready"
+produces = "orders_source_partition"
+operator = "subprocess"
+[node.params]
+argv = ["python", "tasks/wait_for.py", "landing/orders/{{ partition }}.parquet"]
+
+[[node]]
+name = "notify"
+after = ["load"]
+trigger_rule = "all_done"
+operator = "subprocess"
+[node.params]
+argv = ["python", "tasks/notify.py", "{{ run.summary }}"]
