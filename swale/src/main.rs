@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use swale::records::{GraphRunRecord, GraphRunState, NodeRecord, graph_run_key, node_record_key};
 use swale::{
     Daemon, DaemonOptions, DefinitionStore, EVENTS_QUEUE, Error, OperatorSet, Partition,
-    Partitioning, Pools, RecordHook, Scheduler, SchedulerOptions,
+    Partitioning, Pools, RecordHook, Scheduler, SchedulerOptions, StatusReader,
 };
 use taquba::Queue;
 use taquba::object_store::local::LocalFileSystem;
@@ -73,6 +73,32 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         sync_interval: u64,
     },
+    /// Prints the graphs of a store, the graph runs of a graph, or the
+    /// nodes of one graph run. The command only reads from the store, so
+    /// it can run alongside a daemon.
+    Status {
+        /// The graph. Without it, the command lists every graph.
+        graph: Option<String>,
+        /// The partition key of one graph run. Without it, the command
+        /// lists the graph runs of the graph.
+        partition: Option<String>,
+        #[command(flatten)]
+        store: StoreArg,
+        /// The graph runs listed, the latest partitions of the graph.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Prints the job counts of every queue of a store, or the dead jobs
+    /// of one queue. The command only reads from the store.
+    Queues {
+        /// The queue. Without it, the command lists every queue.
+        queue: Option<String>,
+        #[command(flatten)]
+        store: StoreArg,
+        /// The dead jobs listed, in enqueue order.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[derive(clap::Args)]
@@ -111,6 +137,17 @@ async fn main() -> ExitCode {
             )
             .await
         }
+        Command::Status {
+            graph,
+            partition,
+            store,
+            limit,
+        } => status(store, graph, partition, limit).await,
+        Command::Queues {
+            queue,
+            store,
+            limit,
+        } => queues(store, queue, limit).await,
     };
     match result {
         Ok(code) => code,
@@ -217,24 +254,40 @@ struct Store {
     queue_path: String,
 }
 
+/// The value of `--store`, or the default store directory.
+fn store_location(arg: StoreArg) -> Result<String, Box<dyn std::error::Error>> {
+    match arg.store {
+        Some(raw) => Ok(raw),
+        None => Ok(default_store(std::env::home_dir())
+            .ok_or("the default store needs a home directory: pass --store <dir or URL>")?
+            .to_string_lossy()
+            .into_owned()),
+    }
+}
+
+/// Opens the store of a command that writes to it, and creates the
+/// directory of a directory store first.
+fn create_store(arg: StoreArg) -> Result<Store, Box<dyn std::error::Error>> {
+    let location = store_location(arg)?;
+    if !location.contains("://") {
+        std::fs::create_dir_all(&location)?;
+    }
+    open_store(StoreArg {
+        store: Some(location),
+    })
+}
+
 /// Opens the store of `--store`, or the default store: a directory, or an
 /// object store URL with the path in the URL as the store prefix.
 fn open_store(arg: StoreArg) -> Result<Store, Box<dyn std::error::Error>> {
-    let raw = match arg.store {
-        Some(raw) => raw,
-        None => default_store(std::env::home_dir())
-            .ok_or("the default store needs a home directory: pass --store <dir or URL>")?
-            .to_string_lossy()
-            .into_owned(),
-    };
-    let (objects, prefix): (Arc<dyn ObjectStore>, ObjectPath) = if raw.contains("://") {
-        let url = url::Url::parse(&raw)?;
+    let location = store_location(arg)?;
+    let (objects, prefix): (Arc<dyn ObjectStore>, ObjectPath) = if location.contains("://") {
+        let url = url::Url::parse(&location)?;
         let (store, prefix) = parse_url_opts(&url, store_options(std::env::vars()))?;
         (Arc::from(store), prefix)
     } else {
-        std::fs::create_dir_all(&raw)?;
         (
-            Arc::new(LocalFileSystem::new_with_prefix(&raw)?),
+            Arc::new(LocalFileSystem::new_with_prefix(&location)?),
             ObjectPath::default(),
         )
     };
@@ -294,7 +347,7 @@ impl Runtime {
 
 async fn publish(file: &Path, store: StoreArg) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(file)?;
-    let store = open_store(store)?;
+    let store = create_store(store)?;
     let definitions = DefinitionStore::new(
         store.objects,
         &store.prefix,
@@ -325,7 +378,7 @@ async fn daemon(
         .with_writer(std::io::stderr)
         .init();
 
-    let store = open_store(store)?;
+    let store = create_store(store)?;
     let operators = Arc::new(OperatorSet::builtin());
     let definitions = Arc::new(DefinitionStore::new(
         store.objects.clone(),
@@ -357,6 +410,217 @@ async fn daemon(
     Ok(ExitCode::SUCCESS)
 }
 
+/// Opens the status reader of `--store` with the built-in operators.
+async fn open_status(store: StoreArg) -> Result<StatusReader, Box<dyn std::error::Error>> {
+    let store = open_store(store)?;
+    let definitions = Arc::new(DefinitionStore::new(
+        store.objects.clone(),
+        &store.prefix,
+        Arc::new(OperatorSet::builtin()),
+    ));
+    Ok(StatusReader::open(store.objects, &store.queue_path, definitions).await?)
+}
+
+async fn status(
+    store: StoreArg,
+    graph: Option<String>,
+    partition: Option<String>,
+    limit: usize,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let partition = partition.map(Partition::new).transpose()?;
+    let reader = open_status(store).await?;
+    let result = print_status(&reader, graph.as_deref(), partition.as_ref(), limit).await;
+    reader.close().await?;
+    result?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn print_status(
+    reader: &StatusReader,
+    graph: Option<&str>,
+    partition: Option<&Partition>,
+    limit: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(graph) = graph else {
+        let header = [
+            "GRAPH",
+            "DEFINITION",
+            "ACTIVE",
+            "COMPLETE",
+            "FAILED",
+            "CANCELLED",
+            "LATEST",
+        ];
+        let mut rows = Vec::new();
+        for graph in reader.graphs().await? {
+            rows.push([
+                graph.name,
+                graph
+                    .adopted
+                    .map_or("-".to_string(), |record| short_hash(&record.definition)),
+                graph.runs.active.to_string(),
+                graph.runs.complete.to_string(),
+                graph.runs.failed.to_string(),
+                graph.runs.cancelled.to_string(),
+                graph.latest.map_or("-".to_string(), |run| {
+                    format!("{} {}", run.partition, run.record.state)
+                }),
+            ]);
+        }
+        print_table(header, &rows);
+        return Ok(());
+    };
+    let Some(partition) = partition else {
+        let runs = reader.runs(graph).await?;
+        if runs.is_empty() {
+            return Err(format!("graph `{graph}` does not have a graph run").into());
+        }
+        let header = ["PARTITION", "STATE", "REQUESTED", "DEFINITION"];
+        let mut rows = Vec::new();
+        for run in &runs[runs.len().saturating_sub(limit)..] {
+            rows.push([
+                run.partition.to_string(),
+                run.record.state.to_string(),
+                format_time(run.record.requested_at_ms),
+                short_hash(&run.record.definition),
+            ]);
+        }
+        print_table(header, &rows);
+        return Ok(());
+    };
+    let Some(run) = reader.run(graph, partition).await? else {
+        return Err(
+            format!("graph `{graph}` does not have a run for partition `{partition}`").into(),
+        );
+    };
+    println!(
+        "{graph}/{partition}: {}, requested {}, definition {}",
+        run.record.state,
+        format_time(run.record.requested_at_ms),
+        short_hash(&run.record.definition)
+    );
+    let header = ["NODE", "POOL", "STATE", "RUN", "TERMINATED"];
+    let mut rows = Vec::new();
+    for node in &run.nodes {
+        let record = node.record.as_ref();
+        rows.push([
+            node.name.clone(),
+            node.pool.clone(),
+            node.state.to_string(),
+            record.map_or("-".to_string(), |r| r.run_id.clone()),
+            record.map_or("-".to_string(), |r| format_time(r.terminated_at_ms)),
+        ]);
+    }
+    print_table(header, &rows);
+    for node in &run.nodes {
+        if let Some(error) = node.record.as_ref().and_then(|r| r.error.as_ref()) {
+            println!("{}: {error}", node.name);
+        }
+    }
+    Ok(())
+}
+
+async fn queues(
+    store: StoreArg,
+    queue: Option<String>,
+    limit: usize,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let reader = open_status(store).await?;
+    let result = print_queues(&reader, queue.as_deref(), limit).await;
+    reader.close().await?;
+    result?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn print_queues(
+    reader: &StatusReader,
+    queue: Option<&str>,
+    limit: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(queue) = queue else {
+        let header = ["QUEUE", "PENDING", "SCHEDULED", "CLAIMED", "DONE", "DEAD"];
+        let mut rows = Vec::new();
+        for stats in reader.queues().await? {
+            rows.push([
+                stats.queue,
+                stats.pending.to_string(),
+                stats.scheduled.to_string(),
+                stats.claimed.to_string(),
+                stats.done.to_string(),
+                stats.dead.to_string(),
+            ]);
+        }
+        print_table(header, &rows);
+        return Ok(());
+    };
+    let header = ["JOB", "RUN", "ATTEMPTS", "ENQUEUED"];
+    let mut rows = Vec::new();
+    let jobs = reader.dead_jobs(queue, limit).await?;
+    for job in &jobs {
+        rows.push([
+            job.id.clone(),
+            job.headers
+                .get(taquba_workflow::HEADER_RUN_ID)
+                .cloned()
+                .unwrap_or_else(|| "-".to_string()),
+            format!("{}/{}", job.attempts, job.max_attempts),
+            format_time(job.enqueued_at),
+        ]);
+    }
+    print_table(header, &rows);
+    for job in &jobs {
+        if let Some(error) = &job.last_error {
+            println!("{}: {error}", job.id);
+        }
+    }
+    Ok(())
+}
+
+/// The first twelve characters of a definition hash.
+fn short_hash(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+/// A time in milliseconds from the Unix epoch as UTC, to the second.
+fn format_time(ms: u64) -> String {
+    i64::try_from(ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(
+            || ms.to_string(),
+            |time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+}
+
+/// The header and the rows as columns padded to the widest cell.
+fn format_table<const N: usize>(header: [&str; N], rows: &[[String; N]]) -> String {
+    let mut widths = header.map(str::len);
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.len());
+        }
+    }
+    let mut text = String::new();
+    let mut push = |cells: [&str; N]| {
+        let line: Vec<String> = cells
+            .iter()
+            .zip(&widths)
+            .map(|(cell, width)| format!("{cell:<width$}"))
+            .collect();
+        text.push_str(line.join("  ").trim_end());
+        text.push('\n');
+    };
+    push(header);
+    for row in rows {
+        push(row.each_ref().map(String::as_str));
+    }
+    text
+}
+
+fn print_table<const N: usize>(header: [&str; N], rows: &[[String; N]]) {
+    print!("{}", format_table(header, rows));
+}
+
 async fn run(
     file: &Path,
     store: StoreArg,
@@ -372,7 +636,7 @@ async fn run(
         None => return Err("the graph is partitioned: pass --partition <key>".into()),
     };
 
-    let store = open_store(store)?;
+    let store = create_store(store)?;
     let definitions = Arc::new(DefinitionStore::new(
         store.objects.clone(),
         &store.prefix,

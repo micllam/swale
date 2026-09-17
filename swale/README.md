@@ -96,6 +96,16 @@ its credentials. The default store is `~/.swale/store`.
 on the store of a running daemon opens a second writer, and the store then
 refuses the writes of the daemon.
 
+`swale status` lists the graphs of a store with the count of their graph runs
+in each state. `swale status <graph>` lists the latest graph runs of the graph,
+and `swale status <graph> <partition>` lists the nodes of one graph run. A node
+without a record is `ready`, `waiting` or `blocked`. A blocked node does not
+run until a rerun changes the record of an upstream.
+
+`swale queues` lists the job counts of every queue, and `swale queues <queue>`
+lists the dead jobs of one queue. Both commands only read from the store, so
+they can run alongside a daemon.
+
 ```console
 $ swale validate examples/orders_daily.toml
 orders_daily: 5 nodes, 3 edges
@@ -104,14 +114,23 @@ local/none: started, 1 root node(s) submitted
   first: succeeded (local-none-first-r0)
   second: succeeded (local-none-second-r0)
 local/none: complete
+$ swale status local none --store ./swale-store
+local/none: complete, requested 2026-09-17T13:48:19Z, definition 9450f82715de
+NODE    POOL     STATE      RUN                   TERMINATED
+first   default  succeeded  local-none-first-r0   2026-09-17T13:48:19Z
+second  default  succeeded  local-none-second-r0  2026-09-17T13:48:20Z
 $ swale publish examples/orders_daily.toml --store s3://bucket/swale
 orders_daily: published 36e831ff15e026ad45115374cb98edec6b617dffb0d4ef40f9fd351ea36bca9a
 $ swale daemon --store s3://bucket/swale --pool warehouse=2
 ```
 
-The exit status is 0 for a valid definition, a complete run, a publish or an
-interrupted daemon, 1 for a fault, a failed run or an error, and 2 for a usage
-error.
+A command exits with status 0, 1 or 2:
+
+- **0.** The command succeeded. An interrupt ends `swale daemon` with this
+  status.
+- **1.** A definition has a fault, a graph run failed or another error
+  occurred.
+- **2.** The arguments are not valid.
 
 ## License
 

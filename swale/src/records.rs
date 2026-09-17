@@ -16,12 +16,21 @@ use crate::partition::Partition;
 /// The prefix of every key of this crate.
 pub const KV_PREFIX: &str = "swale/";
 
+/// The prefix of every graph record.
+pub const GRAPHS_PREFIX: &str = "swale/graphs/";
+
 /// The prefix of every graph run record.
 pub const GRAPH_RUNS_PREFIX: &str = "swale/runs/";
 
 /// The key of the graph record.
 pub fn graph_key(graph: &str) -> Vec<u8> {
-    format!("{KV_PREFIX}graphs/{graph}").into_bytes()
+    format!("{GRAPHS_PREFIX}{graph}").into_bytes()
+}
+
+/// The graph of a graph record key, or `None` for another key.
+pub fn parse_graph_key(key: &[u8]) -> Option<String> {
+    let graph = std::str::from_utf8(key).ok()?.strip_prefix(GRAPHS_PREFIX)?;
+    crate::graph::is_name(graph).then(|| graph.to_string())
 }
 
 /// The key of the graph run record.
@@ -216,6 +225,11 @@ mod tests {
             task_key("orders_daily", &partition, "notify"),
             b"swale/tasks/orders_daily/20260915/notify"
         );
+        assert_eq!(
+            parse_graph_key(b"swale/graphs/orders_daily"),
+            Some("orders_daily".to_string())
+        );
+        assert_eq!(parse_graph_key(b"swale/runs/orders_daily/20260915"), None);
         assert_eq!(
             parse_graph_run_key(b"swale/runs/orders_daily/20260915"),
             Some(("orders_daily".to_string(), partition))

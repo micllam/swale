@@ -287,3 +287,82 @@ fn publish_command_writes_the_definition_once_and_reports_a_fault_with_status_1(
             .contains("graph name `BAD`")
     );
 }
+
+fn read_command(dir: &std::path::Path, store: &str, args: &[&str]) -> (Option<i32>, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_swale"))
+        .args(args)
+        .arg("--store")
+        .arg(dir.join(store))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    (output.status.code(), stdout)
+}
+
+#[test]
+fn status_and_queues_commands_print_a_failed_run_and_never_create_a_store() {
+    let dir = scratch("swale-status");
+    let file = dir.join("local.toml");
+    std::fs::write(
+        &file,
+        runnable().replace("printf '{\\\"n\\\": 1}'", "exit 4"),
+    )
+    .unwrap();
+    assert_eq!(run_command(&dir, &file, &[]).status.code(), Some(1));
+
+    let (code, stdout) = read_command(&dir, "store", &["status"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert_eq!(
+        stdout,
+        "GRAPH  DEFINITION  ACTIVE  COMPLETE  FAILED  CANCELLED  LATEST\n\
+         local  -           0       0         1       0          none failed\n"
+    );
+
+    let (code, stdout) = read_command(&dir, "store", &["status", "local"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(
+        stdout.starts_with("PARTITION  STATE   REQUESTED"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\nnone       failed  "), "{stdout}");
+
+    let (code, stdout) = read_command(&dir, "store", &["status", "local", "none"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(
+        stdout.starts_with("local/none: failed, requested "),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\nfirst   default  failed   local-none-first-r0  "),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\nsecond  default  blocked  -"), "{stdout}");
+    assert!(
+        stdout.ends_with("\nfirst: `sh` exited with 4: \n"),
+        "{stdout}"
+    );
+
+    let (code, stdout) = read_command(&dir, "store", &["queues"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(
+        stdout.starts_with("QUEUE               PENDING  "),
+        "{stdout}"
+    );
+    let pool = stdout
+        .lines()
+        .find(|line| line.starts_with("swale-pool-default "))
+        .unwrap();
+    assert!(pool.ends_with("  1"), "{stdout}");
+
+    let (code, stdout) = read_command(&dir, "store", &["queues", "swale-pool-default"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(stdout.contains("  local-none-first-r0  1/1  "), "{stdout}");
+
+    for args in [&["status", "absent"][..], &["status", "local", "20260915"]] {
+        let (code, stdout) = read_command(&dir, "store", args);
+        assert_eq!(code, Some(1), "{stdout}");
+    }
+    let (code, _) = read_command(&dir, "absent", &["status"]);
+    assert_eq!(code, Some(1));
+    assert!(!dir.join("absent").exists());
+}

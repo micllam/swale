@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The graph record at `swale/graphs/{graph}`, which records the adopted
   definition of a graph.
 - The default store of every command, `~/.swale/store`.
+- The `swale status` and `swale queues` commands and the `StatusReader` type,
+  which read the graphs, the graph runs, the node states and the queues of a
+  store through a `QueueReader`. The commands only read from the store, so
+  they can run alongside a daemon.
 
 ### Changed
 
