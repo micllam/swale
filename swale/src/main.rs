@@ -13,7 +13,7 @@ use swale::{
 use taquba::Queue;
 use taquba::object_store::local::LocalFileSystem;
 use taquba::object_store::path::Path as ObjectPath;
-use taquba::object_store::{ObjectStore, parse_url};
+use taquba::object_store::{ObjectStore, parse_url_opts};
 use tokio_util::sync::CancellationToken;
 
 /// The SlateDB path of the queue within the store.
@@ -193,6 +193,22 @@ fn default_store(home: Option<PathBuf>) -> Option<PathBuf> {
     Some(home.join(".swale").join("store"))
 }
 
+/// The object store options among the environment variables `vars`: the
+/// variables of the three providers, with the name in lower case as the
+/// option key. The prefixes exclude a variable of another program whose lower
+/// case name is an option key, such as `TOKEN` or `ENDPOINT`.
+fn store_options(
+    vars: impl Iterator<Item = (String, String)>,
+) -> impl Iterator<Item = (String, String)> {
+    vars.filter_map(|(name, value)| {
+        let key = name.to_ascii_lowercase();
+        ["aws_", "google_", "azure_"]
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+            .then_some((key, value))
+    })
+}
+
 /// An open store: the object store, the store prefix and the path of the
 /// queue within the store.
 struct Store {
@@ -213,7 +229,7 @@ fn open_store(arg: StoreArg) -> Result<Store, Box<dyn std::error::Error>> {
     };
     let (objects, prefix): (Arc<dyn ObjectStore>, ObjectPath) = if raw.contains("://") {
         let url = url::Url::parse(&raw)?;
-        let (store, prefix) = parse_url(&url)?;
+        let (store, prefix) = parse_url_opts(&url, store_options(std::env::vars()))?;
         (Arc::from(store), prefix)
     } else {
         std::fs::create_dir_all(&raw)?;
@@ -452,6 +468,28 @@ mod tests {
         );
         assert_eq!(default_store(Some(PathBuf::new())), None);
         assert_eq!(default_store(None), None);
+    }
+
+    #[test]
+    fn the_store_options_are_the_provider_variables_in_lower_case() {
+        let vars = [
+            ("AWS_ENDPOINT", "http://127.0.0.1:9000"),
+            ("ENDPOINT", "other"),
+            ("GOOGLE_SERVICE_ACCOUNT", "sa.json"),
+            ("AZURE_STORAGE_ACCOUNT_NAME", "account"),
+            ("HOME", "/home/u"),
+        ]
+        .map(|(name, value)| (name.to_string(), value.to_string()));
+        let options: Vec<(String, String)> = store_options(vars.into_iter()).collect();
+        assert_eq!(
+            options,
+            [
+                ("aws_endpoint", "http://127.0.0.1:9000"),
+                ("google_service_account", "sa.json"),
+                ("azure_storage_account_name", "account"),
+            ]
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+        );
     }
 
     #[test]

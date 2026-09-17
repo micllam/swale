@@ -48,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `scheduler::Error` has the variants `Definition`,
   `UnknownGraph` and `NoPartition`. Add a wildcard arm to an exhaustive match.
 
+### Fixed
+
+- A store URL with a cloud scheme reads the provider's environment variables
+  (`AWS_*`, `GOOGLE_*` and `AZURE_*`) for its credentials, its region and its
+  endpoint. 0.1.0 did not read them, so an `s3://` store did not open with
+  the credentials of the environment.
+
 ## [0.1.0] - 2026-09-16
 
 ### Added
