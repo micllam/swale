@@ -1,6 +1,7 @@
 //! The KV records of the orchestrator and their keys. Every key has the
 //! `swale/` prefix, and every value is JSON written as an absolute value.
 //!
+//! - `swale/graphs/{graph}`: the [`GraphRecord`].
 //! - `swale/runs/{graph}/{partition}`: the [`GraphRunRecord`].
 //! - `swale/assets/{asset}/{partition}`: the [`NodeRecord`] of an asset node.
 //! - `swale/tasks/{graph}/{partition}/{node}`: the [`NodeRecord`] of a task
@@ -17,6 +18,11 @@ pub const KV_PREFIX: &str = "swale/";
 
 /// The prefix of every graph run record.
 pub const GRAPH_RUNS_PREFIX: &str = "swale/runs/";
+
+/// The key of the graph record.
+pub fn graph_key(graph: &str) -> Vec<u8> {
+    format!("{KV_PREFIX}graphs/{graph}").into_bytes()
+}
 
 /// The key of the graph run record.
 pub fn graph_run_key(graph: &str, partition: &Partition) -> Vec<u8> {
@@ -160,6 +166,16 @@ pub struct GraphRunRecord {
     pub state: GraphRunState,
 }
 
+/// The record of a graph the process adopted: the definition that a trigger
+/// of the graph starts. The daemon is the one writer of the record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphRecord {
+    /// The hash of the adopted definition.
+    pub definition: String,
+    /// The time of the adoption, in milliseconds from the Unix epoch.
+    pub adopted_at_ms: u64,
+}
+
 macro_rules! json_record {
     ($t:ty) => {
         impl $t {
@@ -178,6 +194,7 @@ macro_rules! json_record {
 
 json_record!(NodeRecord);
 json_record!(GraphRunRecord);
+json_record!(GraphRecord);
 
 #[cfg(test)]
 mod tests {
@@ -186,6 +203,7 @@ mod tests {
     #[test]
     fn keys_have_the_documented_layout() {
         let partition = Partition::new("20260915").unwrap();
+        assert_eq!(graph_key("orders_daily"), b"swale/graphs/orders_daily");
         assert_eq!(
             graph_run_key("orders_daily", &partition),
             b"swale/runs/orders_daily/20260915"

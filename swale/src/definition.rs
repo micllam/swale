@@ -3,8 +3,8 @@
 //! ```toml
 //! [graph]
 //! name = "orders_daily"        # [a-z0-9_]+
-//! schedule = "0 2 * * *"       # optional, five-field cron
-//! catchup = "7d"               # optional
+//! schedule = "0 2 * * *"       # optional, five-field cron in UTC
+//! catchup = "7d"               # optional, the catch-up and backfill window
 //! partition = "daily"          # daily, hourly or none (the default)
 //!
 //! [[node]]
@@ -19,6 +19,11 @@
 //! [node.params]                # the operator's parameters
 //! argv = ["python", "tasks/extract.py"]
 //! ```
+//!
+//! A graph with a `schedule` declares `partition` as `daily` or `hourly`,
+//! because every firing runs a partition of its own (see [`crate::daemon`]).
+//! The `schedule` is a [`taquba_cron::Expression`]: a step follows a range or
+//! `*`, as in `5-59/5 * * * *`.
 
 use std::path::Path;
 
@@ -242,7 +247,7 @@ mod tests {
             "name = \"g\"\nschedule = \"0 2 * * *\"\ncatchup = \"7d\"\npartition = \"hourly\"",
         );
         let graph = load(&text).unwrap();
-        assert_eq!(graph.schedule(), Some("0 2 * * *"));
+        assert_eq!(graph.schedule().unwrap().to_string(), "0 2 * * *");
         assert_eq!(
             graph.catchup(),
             Some(std::time::Duration::from_secs(7 * 86_400))

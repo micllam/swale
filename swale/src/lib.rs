@@ -49,6 +49,18 @@
 //! # Ok(()) }
 //! ```
 //!
+//! # Schedule
+//!
+//! The daemon fires the `schedule` of a graph, a cron expression with five
+//! fields in UTC. The partition of a firing is the start of the schedule
+//! interval that ends at the firing time: a daily schedule at 02:00 that
+//! fires on 2026-09-16 runs the partition `20260915`. A graph with a schedule
+//! declares `partition` as `daily` or `hourly`.
+//!
+//! The first adoption of a graph runs the partitions of the firings within
+//! its `catchup` window. After downtime the daemon replays the missed firings
+//! within the same window.
+//!
 //! # Command
 //!
 //! The `swale` binary is enabled by the default `cli` feature. A program that
@@ -57,13 +69,26 @@
 //! `swale validate` loads a definition and prints each fault, one per line.
 //!
 //! `swale run` runs a graph for one partition on a store, prints each node's
-//! record as it is written and waits for the run to settle. The store is a
-//! directory or an object store URL (`s3://bucket/prefix`,
-//! `gs://bucket/prefix`, `az://container/prefix`). A cloud scheme needs the
-//! matching cargo feature (`aws`, `gcp` or `azure`) and reads the provider's
-//! environment variables for its credentials. A second `run` for the same
-//! partition resumes the existing graph run, and a process interrupted
-//! mid-run resumes without repeating a completed node.
+//! record as it is written and waits for the run to settle. A second `run`
+//! for the same partition resumes the existing graph run, and a process
+//! interrupted mid-run resumes without repeating a completed node.
+//!
+//! `swale publish` writes a definition to the store as the current definition
+//! of its graph. `swale daemon` runs the published graphs until it is
+//! interrupted. It adopts each published definition within one sync interval,
+//! fires each schedule and runs the task instances. A graph run keeps the
+//! definition it started from, so an edit applies from the next graph run.
+//! The `default` pool always exists, and `--pool name=steps` adds a pool.
+//!
+//! Every command that opens a store takes `--store`: a directory or an object
+//! store URL (`s3://bucket/prefix`, `gs://bucket/prefix`,
+//! `az://container/prefix`). A cloud scheme needs the matching cargo feature
+//! (`aws`, `gcp` or `azure`) and reads the provider's environment variables
+//! for its credentials. The default store is `~/.swale/store`.
+//!
+//! `swale run` and `swale daemon` open the store as its one writer. A
+//! `swale run` on the store of a running daemon opens a second writer, and
+//! the store then refuses the writes of the daemon.
 //!
 //! ```console
 //! $ swale validate examples/orders_daily.toml
@@ -73,12 +98,18 @@
 //!   first: succeeded (local-none-first-r0)
 //!   second: succeeded (local-none-second-r0)
 //! local/none: complete
+//! $ swale publish examples/orders_daily.toml --store s3://bucket/swale
+//! orders_daily: published 36e831ff15e026ad45115374cb98edec6b617dffb0d4ef40f9fd351ea36bca9a
+//! $ swale daemon --store s3://bucket/swale --pool warehouse=2
 //! ```
 //!
-//! The exit status is 0 for a valid definition or a complete run, 1 for a
-//! fault, a failed run or an error, and 2 for a usage error.
+//! The exit status is 0 for a valid definition, a complete run, a publish or
+//! an interrupted daemon, 1 for a fault, a failed run or an error, and 2 for
+//! a usage error.
 
+pub mod daemon;
 pub mod definition;
+pub mod definition_store;
 pub mod dispatch;
 pub mod duration;
 mod error;
@@ -92,14 +123,18 @@ pub mod scheduler;
 pub mod subprocess;
 pub mod task;
 pub mod template;
+pub mod trigger;
 
+pub use daemon::{Daemon, DaemonOptions};
 pub use definition::{load_path, load_str};
+pub use definition_store::{DefinitionError, DefinitionStore, Published};
 pub use error::Error;
 pub use graph::{Graph, GraphSpec, Node, NodeKind, NodeSpec, Partitioning, Problem, TriggerRule};
 pub use hook::{EVENTS_QUEUE, Event, RecordHook};
 pub use operator::{Operator, OperatorSet, Outcome, Task};
 pub use partition::Partition;
-pub use records::{GraphRunRecord, GraphRunState, NodeRecord, RecordStatus};
-pub use scheduler::{DefinitionStore, Pools, Scheduler, SchedulerOptions, StartOutcome};
+pub use records::{GraphRecord, GraphRunRecord, GraphRunState, NodeRecord, RecordStatus};
+pub use scheduler::{Pools, Scheduler, SchedulerOptions, StartOutcome};
 pub use task::TaskIdentity;
 pub use template::Template;
+pub use trigger::{TRIGGERS_QUEUE, Trigger};

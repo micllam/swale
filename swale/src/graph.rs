@@ -5,6 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use taquba_cron::Expression;
+
 use crate::operator::{OperatorError, OperatorSet};
 use crate::template::Template;
 
@@ -161,7 +163,7 @@ impl Node {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Graph {
     name: String,
-    schedule: Option<String>,
+    schedule: Option<Expression>,
     catchup: Option<Duration>,
     partitioning: Partitioning,
     nodes: Vec<Node>,
@@ -183,6 +185,10 @@ pub enum Problem {
         /// The parser's message.
         message: String,
     },
+    /// The graph has a schedule and a single partition. Every firing of a
+    /// schedule runs a partition of its own.
+    #[error("a graph with a schedule declares `partition` as `daily` or `hourly`")]
+    ScheduleWithoutPartition,
     /// The catch-up window is not a duration.
     #[error("catchup: {0}")]
     InvalidCatchup(String),
@@ -304,13 +310,24 @@ impl Graph {
         if !is_name(&spec.name) {
             problems.push(Problem::InvalidGraphName(spec.name.clone()));
         }
-        if let Some(expression) = &spec.schedule
-            && let Err(e) = croner::Cron::new(expression).parse()
-        {
-            problems.push(Problem::InvalidSchedule {
-                expression: expression.clone(),
-                message: e.to_string(),
-            });
+        let mut schedule = None;
+        if let Some(expression) = &spec.schedule {
+            match expression.parse::<Expression>() {
+                Ok(parsed) => schedule = Some(parsed),
+                Err(e) => {
+                    let message = match e {
+                        taquba_cron::Error::InvalidExpression { message, .. } => message,
+                        other => other.to_string(),
+                    };
+                    problems.push(Problem::InvalidSchedule {
+                        expression: expression.clone(),
+                        message,
+                    });
+                }
+            }
+        }
+        if spec.schedule.is_some() && spec.partitioning == Partitioning::Unpartitioned {
+            problems.push(Problem::ScheduleWithoutPartition);
         }
         if spec.nodes.is_empty() {
             problems.push(Problem::NoNodes);
@@ -440,7 +457,7 @@ impl Graph {
 
         Ok(Graph {
             name: spec.name,
-            schedule: spec.schedule,
+            schedule,
             catchup: spec.catchup,
             partitioning: spec.partitioning,
             nodes,
@@ -454,8 +471,10 @@ impl Graph {
     }
 
     /// The cron expression, absent for a graph run by target requests only.
-    pub fn schedule(&self) -> Option<&str> {
-        self.schedule.as_deref()
+    /// It displays as the text the parser normalises, so `0 9 * * mon-fri`
+    /// displays as `0 9 * * 1-5`.
+    pub fn schedule(&self) -> Option<&Expression> {
+        self.schedule.as_ref()
     }
 
     /// The catch-up window of a newly published graph.
@@ -717,11 +736,13 @@ mod tests {
         ]);
         bad.name = "Bad-Graph".into();
         bad.schedule = Some("every day".into());
+        bad.partitioning = Partitioning::Unpartitioned;
         let problems = Graph::build(bad, &OperatorSet::builtin()).unwrap_err();
         assert!(problems.contains(&Problem::InvalidGraphName("Bad-Graph".into())));
         assert!(
             matches!(&problems[1], Problem::InvalidSchedule { expression, .. } if expression == "every day")
         );
+        assert!(problems.contains(&Problem::ScheduleWithoutPartition));
         assert!(problems.contains(&Problem::InvalidNodeName("Extract".into())));
         assert!(problems.contains(&Problem::InvalidAssetName {
             node: "Extract".into(),

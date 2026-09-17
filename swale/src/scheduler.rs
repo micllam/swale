@@ -7,6 +7,12 @@
 //! events queue. Every submit is idempotent on the deterministic run id, so a
 //! redelivered event and a repeated reconciler pass are harmless.
 //!
+//! A [`Trigger`] on the triggers queue starts graph runs of the graph's
+//! adopted definition ([`Scheduler::handle_trigger`]). A cron firing starts
+//! the run of one partition: the partition that contains the start of the
+//! schedule interval that the firing ends. A target request starts the run
+//! of every partition it lists.
+//!
 //! The reconciler ([`Scheduler::reconcile`]) applies the same readiness rule
 //! to every node of every active graph run, cancels the active runs of a
 //! cancelled graph run and writes the final state. A lost event delays a
@@ -14,7 +20,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use taquba::object_store::ObjectStore;
@@ -24,14 +30,16 @@ use taquba::{
 use taquba_workflow::{RunId, RunOptions, RunSpec, RunState, RunnerHandle, WorkflowRuntime};
 use tokio_util::sync::CancellationToken;
 
+use crate::definition_store::{DefinitionError, DefinitionStore};
 use crate::dispatch::Dispatch;
 use crate::graph::{Graph, Node, TriggerRule};
 use crate::hook::{EVENTS_QUEUE, Event, RecordHook};
 use crate::input::TaskInput;
 use crate::operator::OperatorSet;
 use crate::partition::Partition;
-use crate::records::{self, GraphRunRecord, GraphRunState, NodeRecord, RecordStatus};
+use crate::records::{self, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord, RecordStatus};
 use crate::task::TaskIdentity;
+use crate::trigger::{TRIGGERS_QUEUE, Trigger, TriggerWorker};
 
 /// A failure of the scheduler.
 #[derive(Debug, thiserror::Error)]
@@ -50,9 +58,20 @@ pub enum Error {
         /// The parser's error.
         source: serde_json::Error,
     },
+    /// The definition store failed.
+    #[error(transparent)]
+    Definition(#[from] DefinitionError),
     /// The graph run records a definition the store does not have.
     #[error("definition `{0}` is not in the definition store")]
     UnknownDefinition(String),
+    /// The graph does not have a graph record, so the process did not adopt
+    /// a definition of the graph.
+    #[error("graph `{0}` does not have an adopted definition")]
+    UnknownGraph(String),
+    /// The trigger does not list a partition, and it is not a cron firing
+    /// with an earlier occurrence of the schedule.
+    #[error("the trigger of graph `{0}` does not determine a partition")]
+    NoPartition(String),
     /// The pool of a node does not have a runtime.
     #[error("node `{node}`: pool `{pool}` does not have a runtime")]
     UnknownPool {
@@ -77,38 +96,6 @@ pub enum Error {
         /// The node.
         node: String,
     },
-}
-
-/// The definitions the process runs, by hash.
-#[derive(Debug, Default)]
-pub struct DefinitionStore {
-    graphs: RwLock<HashMap<String, Arc<Graph>>>,
-}
-
-impl DefinitionStore {
-    /// An empty store.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Adds `graph` at `hash` (see [`crate::definition::hash`]).
-    pub fn insert(&self, hash: impl Into<String>, graph: Graph) -> Arc<Graph> {
-        let graph = Arc::new(graph);
-        self.graphs
-            .write()
-            .expect("the definition store is not poisoned")
-            .insert(hash.into(), graph.clone());
-        graph
-    }
-
-    /// The graph at `hash`.
-    pub fn get(&self, hash: &str) -> Option<Arc<Graph>> {
-        self.graphs
-            .read()
-            .expect("the definition store is not poisoned")
-            .get(hash)
-            .cloned()
-    }
 }
 
 /// The runtime of a pool.
@@ -223,9 +210,9 @@ impl Pools {
 /// The settings of [`Scheduler::run`].
 #[derive(Debug, Clone)]
 pub struct SchedulerOptions {
-    /// Events handled at a time.
+    /// Events handled at a time, and triggers handled at a time.
     pub concurrency: usize,
-    /// The poll interval of the events worker.
+    /// The poll interval of the events worker and of the triggers worker.
     pub poll_interval: Duration,
     /// The time between reconciler passes.
     pub reconcile_interval: Duration,
@@ -272,11 +259,13 @@ pub struct Scheduler {
     pools: Arc<Pools>,
     clock: Arc<dyn Clock>,
     events_queue: String,
+    triggers_queue: String,
 }
 
 impl Scheduler {
     /// A scheduler over `queue`, running the graphs of `definitions` on
-    /// `pools`, with [`EVENTS_QUEUE`] as its events queue.
+    /// `pools`, with [`EVENTS_QUEUE`] as its events queue and
+    /// [`TRIGGERS_QUEUE`] as its triggers queue.
     pub fn new(queue: Arc<Queue>, definitions: Arc<DefinitionStore>, pools: Arc<Pools>) -> Self {
         let clock = queue.clock();
         Scheduler {
@@ -285,7 +274,13 @@ impl Scheduler {
             pools,
             clock,
             events_queue: EVENTS_QUEUE.to_string(),
+            triggers_queue: TRIGGERS_QUEUE.to_string(),
         }
+    }
+
+    /// The definition store.
+    pub fn definitions(&self) -> &Arc<DefinitionStore> {
+        &self.definitions
     }
 
     /// Starts the graph run of the definition `hash` for `partition`: writes
@@ -296,7 +291,7 @@ impl Scheduler {
         hash: &str,
         partition: &Partition,
     ) -> Result<StartOutcome, Error> {
-        let graph = self.graph(hash)?;
+        let graph = self.graph(hash).await?;
         let record = GraphRunRecord {
             definition: hash.to_string(),
             requested_at_ms: self.clock.now_ms(),
@@ -343,7 +338,7 @@ impl Scheduler {
                 partition: partition.clone(),
             });
         };
-        let graph = self.graph(&run.definition)?;
+        let graph = self.graph(&run.definition).await?;
         let node = graph.node(node).ok_or_else(|| Error::UnknownNode {
             graph: graph_name.to_string(),
             node: node.to_string(),
@@ -402,9 +397,50 @@ impl Scheduler {
         {
             return Ok(false);
         }
-        let graph = self.graph(&run.definition)?;
+        let graph = self.graph(&run.definition).await?;
         self.cancel_active_runs(&graph, partition).await?;
         Ok(true)
+    }
+
+    /// Handles one trigger: starts the graph run of the graph's adopted
+    /// definition for every partition of the trigger. A trigger without a
+    /// partition is a cron firing, and `interval_start_ms` is the occurrence
+    /// of the schedule before the firing time. A partition with a graph run
+    /// is unchanged. Returns the partitions whose graph run the call started.
+    pub async fn handle_trigger(
+        &self,
+        trigger: &Trigger,
+        interval_start_ms: Option<u64>,
+    ) -> Result<Vec<Partition>, Error> {
+        let key = records::graph_key(&trigger.graph);
+        let Some(bytes) = self.queue.kv_get(&key).await? else {
+            return Err(Error::UnknownGraph(trigger.graph.clone()));
+        };
+        let record = GraphRecord::from_bytes(&bytes).map_err(|source| Error::Record {
+            key: String::from_utf8_lossy(&key).into_owned(),
+            source,
+        })?;
+        let partitions = if trigger.partitions.is_empty() {
+            let graph = self.graph(&record.definition).await?;
+            let partition = interval_start_ms
+                .and_then(|ms| Partition::of_time(graph.partitioning(), ms))
+                .ok_or_else(|| Error::NoPartition(trigger.graph.clone()))?;
+            vec![partition]
+        } else {
+            trigger.partitions.clone()
+        };
+        let mut started = Vec::new();
+        for partition in partitions {
+            if self
+                .start_run(&record.definition, &partition)
+                .await?
+                .started
+            {
+                tracing::info!(graph = %trigger.graph, %partition, "graph run started");
+                started.push(partition);
+            }
+        }
+        Ok(started)
     }
 
     /// Handles the termination of one task instance: submits every downstream
@@ -417,7 +453,7 @@ impl Scheduler {
         if run.state != GraphRunState::Active {
             return Ok(());
         }
-        let graph = self.graph(&run.definition)?;
+        let graph = self.graph(&run.definition).await?;
         let Some(node) = graph.node(&event.node) else {
             return Ok(());
         };
@@ -453,9 +489,16 @@ impl Scheduler {
                     key: String::from_utf8_lossy(key).into_owned(),
                     source,
                 })?;
-                let Some(graph) = self.definitions.get(&run.definition) else {
-                    tracing::warn!(graph = %graph_name, %partition, definition = %run.definition, "graph run records an unknown definition");
-                    continue;
+                let graph = match self.definitions.get(&run.definition).await {
+                    Ok(Some(graph)) => graph,
+                    Ok(None) => {
+                        tracing::warn!(graph = %graph_name, %partition, definition = %run.definition, "graph run records an unknown definition");
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(graph = %graph_name, %partition, definition = %run.definition, error = %e, "the definition of a graph run does not load");
+                        continue;
+                    }
                 };
                 match run.state {
                     GraphRunState::Active => {
@@ -485,7 +528,8 @@ impl Scheduler {
         }
     }
 
-    /// Runs the events worker and the reconciler until `shutdown` resolves.
+    /// Runs the events worker, the triggers worker and the reconciler until
+    /// `shutdown` resolves.
     pub async fn run<F: Future<Output = ()>>(
         self: Arc<Self>,
         options: SchedulerOptions,
@@ -496,6 +540,14 @@ impl Scheduler {
             &self.queue,
             &self.events_queue,
             self.clone(),
+            options.concurrency,
+            options.poll_interval,
+            stop.clone().cancelled_owned(),
+        );
+        let triggers = taquba::run_worker_concurrent(
+            &self.queue,
+            &self.triggers_queue,
+            Arc::new(TriggerWorker::new(self.clone())),
             options.concurrency,
             options.poll_interval,
             stop.clone().cancelled_owned(),
@@ -514,15 +566,15 @@ impl Scheduler {
                 }
             }
         };
-        let mut both = std::pin::pin!(async {
-            let (worker, ()) = tokio::join!(worker, reconciler);
-            worker
+        let mut all = std::pin::pin!(async {
+            let (worker, triggers, ()) = tokio::join!(worker, triggers, reconciler);
+            worker.and(triggers)
         });
         tokio::select! {
-            result = &mut both => Ok(result?),
+            result = &mut all => Ok(result?),
             () = shutdown => {
                 stop.cancel();
-                Ok(both.await?)
+                Ok(all.await?)
             }
         }
     }
@@ -541,9 +593,10 @@ impl Scheduler {
         })
     }
 
-    fn graph(&self, hash: &str) -> Result<Arc<Graph>, Error> {
+    async fn graph(&self, hash: &str) -> Result<Arc<Graph>, Error> {
         self.definitions
             .get(hash)
+            .await?
             .ok_or_else(|| Error::UnknownDefinition(hash.to_string()))
     }
 

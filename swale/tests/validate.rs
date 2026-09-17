@@ -18,7 +18,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 fn example_graph_loads_with_the_documented_structure() {
     let graph = swale::load_path(Path::new(EXAMPLE), &OperatorSet::builtin()).unwrap();
     assert_eq!(graph.name(), "orders_daily");
-    assert_eq!(graph.schedule(), Some("0 2 * * *"));
+    assert_eq!(graph.schedule().unwrap().to_string(), "0 2 * * *");
     assert_eq!(
         graph.catchup(),
         Some(std::time::Duration::from_secs(7 * 86_400))
@@ -242,4 +242,48 @@ fn run_command_requires_a_partition_for_a_partitioned_graph() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("(local-20260915-first-r0)"), "{stdout}");
+}
+
+#[test]
+fn publish_command_writes_the_definition_once_and_reports_a_fault_with_status_1() {
+    let dir = scratch("swale-publish");
+    let publish = |file: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_swale"))
+            .arg("publish")
+            .arg(file)
+            .arg("--store")
+            .arg(dir.join("store"))
+            .output()
+            .unwrap()
+    };
+    let hash = swale::definition::hash(&std::fs::read_to_string(EXAMPLE).unwrap());
+
+    let output = publish(Path::new(EXAMPLE));
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("orders_daily: published {hash}\n")
+    );
+    let definitions = dir.join("store/definitions");
+    assert!(definitions.join(format!("{hash}.toml")).is_file());
+    assert_eq!(
+        std::fs::read_to_string(definitions.join("current/orders_daily")).unwrap(),
+        hash
+    );
+
+    let output = publish(Path::new(EXAMPLE));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("orders_daily: unchanged {hash}\n")
+    );
+
+    let bad = dir.join("bad.toml");
+    std::fs::write(&bad, "[graph]\nname = \"BAD\"\n").unwrap();
+    let output = publish(&bad);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("graph name `BAD`")
+    );
 }

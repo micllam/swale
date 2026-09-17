@@ -8,7 +8,7 @@ use swale::records::{GraphRunRecord, GraphRunState, NodeRecord, RecordStatus, gr
 use swale::scheduler::ReconcileReport;
 use swale::{
     DefinitionStore, EVENTS_QUEUE, OperatorSet, Partition, Pools, RecordHook, Scheduler,
-    SchedulerOptions, definition,
+    SchedulerOptions,
 };
 use taquba::object_store::ObjectStore;
 use taquba::object_store::memory::InMemory;
@@ -90,10 +90,8 @@ impl Harness {
                 .unwrap(),
         );
         let operators = Arc::new(OperatorSet::builtin());
-        let graph = swale::load_str(text, &operators).unwrap();
-        let hash = definition::hash(text);
-        let definitions = Arc::new(DefinitionStore::new());
-        definitions.insert(hash.clone(), graph);
+        let definitions = Arc::new(DefinitionStore::new(store.clone(), "", operators.clone()));
+        let (hash, _) = definitions.put(text).await.unwrap();
         let hook = RecordHook::new(queue.clock(), EVENTS_QUEUE);
         let pools = Arc::new(
             Pools::builder(queue.clone(), store, operators, hook)

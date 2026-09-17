@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The `swale daemon` command and the `Daemon` type: the process adopts the
+  published definitions, fires the schedule of each graph through
+  `taquba-cron` and runs the task instances. The first adoption of a graph
+  runs the partitions within its `catchup` window, and the daemon replays the
+  firings missed during downtime within the same window.
+- The `swale publish` command and `DefinitionStore::publish`, which write a
+  definition and the pointer of its graph to the object store. The publish
+  refuses an asset that the current definition of another graph produces.
+- `Partition::of_time`, which gives the partition that contains a time. The
+  partition of a firing contains the start of the schedule interval that ends
+  at the firing time.
+- The `Trigger` payload, the `swale-triggers` queue and
+  `Scheduler::handle_trigger`, which start the graph runs of a firing or of a
+  list of partitions.
+- The graph record at `swale/graphs/{graph}`, which records the adopted
+  definition of a graph.
+- The default store of every command, `~/.swale/store`.
+
+### Changed
+
+- **Breaking:** `DefinitionStore` stores every definition in the object store
+  at `definitions/{hash}.toml` within the store prefix, so a graph run resumes
+  with its definition after the file changes. Construct it with
+  `DefinitionStore::new(store, store_prefix, operators)` and replace `insert`
+  with `put`, and `get` is async. The type moved from `scheduler` to
+  `definition_store`.
+- **Breaking:** a definition with a `schedule` and without a `daily` or
+  `hourly` partition fails the load with `Problem::ScheduleWithoutPartition`.
+  Declare `partition` in a scheduled graph.
+- **Breaking:** the `schedule` of a definition is parsed by `taquba-cron`
+  0.10, and the direct `croner` dependency is removed. A step without a range,
+  as in `5/5 * * * *`, fails the load, and a `+` prefix on the day-of-week
+  field requires both day fields to match. Write the range, as in
+  `5-59/5 * * * *`, and remove the prefix to keep the earlier firing times.
+- **Breaking:** `Graph::schedule` returns the parsed `taquba_cron::Expression`.
+  Call `to_string` on the value for the text, which the parser normalises.
+- **Breaking:** `scheduler::Error` has the variants `Definition`,
+  `UnknownGraph` and `NoPartition`. Add a wildcard arm to an exhaustive match.
+
 ## [0.1.0] - 2026-09-16
 
 ### Added

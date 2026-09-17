@@ -49,6 +49,10 @@ argv = ["python", "tasks/load.py", "{{ upstream.extract.rows_key }}"]
 `swale run` runs a graph for one partition on a store, a directory or an object
 store URL (`s3://`, `gs://`, `az://`), and resumes an existing graph run.
 
+`swale publish` writes a definition to the store, and `swale daemon` runs the
+published graphs: it fires each schedule, catches up a new graph and replays
+the firings missed during downtime.
+
 ```console
 $ cargo install swale
 $ swale validate swale/examples/orders_daily.toml
@@ -58,6 +62,9 @@ local/none: started, 1 root node(s) submitted
   first: succeeded (local-none-first-r0)
   second: succeeded (local-none-second-r0)
 local/none: complete
+$ swale publish swale/examples/orders_daily.toml --store s3://bucket/swale
+orders_daily: published 36e831ff15e026ad45115374cb98edec6b617dffb0d4ef40f9fd351ea36bca9a
+$ swale daemon --store s3://bucket/swale --pool warehouse=2
 ```
 
 ## License

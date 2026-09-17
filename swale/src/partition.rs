@@ -2,7 +2,10 @@
 
 use std::fmt;
 
+use chrono::{DateTime, Datelike, Timelike};
 use serde::{Deserialize, Serialize};
+
+use crate::graph::Partitioning;
 
 /// Maximum length of a partition key in bytes.
 pub const MAX_PARTITION_LEN: usize = 16;
@@ -34,6 +37,20 @@ impl Partition {
         } else {
             Err(InvalidPartition(text))
         }
+    }
+
+    /// The partition of `partitioning` that contains the time `ms`, in
+    /// milliseconds from the Unix epoch, in UTC. `None` for a time beyond the
+    /// year 9999.
+    pub fn of_time(partitioning: Partitioning, ms: u64) -> Option<Self> {
+        let time = DateTime::from_timestamp_millis(i64::try_from(ms).ok()?)?;
+        let (year, month, day) = (time.year(), time.month(), time.day());
+        let key = match partitioning {
+            Partitioning::Daily => format!("{year:04}{month:02}{day:02}"),
+            Partitioning::Hourly => format!("{year:04}{month:02}{day:02}T{:02}", time.hour()),
+            Partitioning::Unpartitioned => return Some(Partition::none()),
+        };
+        Partition::new(key).ok()
     }
 
     /// The key of an unpartitioned asset.
@@ -83,6 +100,31 @@ mod tests {
             );
         }
         assert_eq!(Partition::none().as_str(), UNPARTITIONED);
+    }
+
+    #[test]
+    fn the_partition_of_a_time_has_the_format_of_the_partitioning() {
+        // 2026-02-28T23:59:59.999Z and the millisecond after it.
+        let end_of_february = 1_772_323_199_999;
+        let of_time = |partitioning, ms| Partition::of_time(partitioning, ms).unwrap();
+        assert_eq!(
+            of_time(Partitioning::Daily, end_of_february).as_str(),
+            "20260228"
+        );
+        assert_eq!(
+            of_time(Partitioning::Daily, end_of_february + 1).as_str(),
+            "20260301"
+        );
+        assert_eq!(
+            of_time(Partitioning::Hourly, end_of_february).as_str(),
+            "20260228T23"
+        );
+        assert_eq!(
+            of_time(Partitioning::Hourly, end_of_february + 1).as_str(),
+            "20260301T00"
+        );
+        assert_eq!(of_time(Partitioning::Unpartitioned, 0), Partition::none());
+        assert_eq!(Partition::of_time(Partitioning::Daily, u64::MAX), None);
     }
 
     #[test]
