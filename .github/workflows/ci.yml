@@ -50,3 +50,37 @@ jobs:
         with:
           shared-key: test
       - run: cargo test --workspace --locked
+
+  # The commands against an S3 API: the `aws` feature at run time, the store
+  # prefix and two processes on one bucket.
+  minio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      minio:
+        # The official minio image requires a `server /data` command, which
+        # service containers cannot supply. The Bitnami build starts from
+        # environment variables and pre-creates the bucket. bitnamilegacy is
+        # frozen, so the digest is pinned.
+        image: bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_DEFAULT_BUCKETS: swale
+        ports:
+          - 9000:9000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: minio
+      - name: s3 tests against MinIO
+        env:
+          SWALE_TEST_STORE_URL: s3://swale/ci-${{ github.run_id }}
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_REGION: us-east-1
+          AWS_ENDPOINT: http://127.0.0.1:9000
+          AWS_ALLOW_HTTP: "true"
+        run: cargo test -p swale --features aws --test s3 --locked -- --ignored

@@ -25,6 +25,11 @@ azure = ["taquba/azure"]
 name = "swale"
 required-features = ["cli"]
 
+# The test parses its store URL with the `url` dependency of the command.
+[[test]]
+name = "s3"
+required-features = ["cli"]
+
 [dependencies]
 taquba = { workspace = true }
 taquba-workflow = { workspace = true }
