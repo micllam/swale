@@ -10,14 +10,14 @@ name = "local"
 [[node]]
 name = "first"
 produces = "first"
-operator = "subprocess"
+operator = "shell"
 [node.params]
-argv = ["sh", "-c", "cat >/dev/null; printf '{\"n\": 1}'"]
+command = "printf '{\"n\": 1}'"
 
 [[node]]
 name = "second"
 produces = "second"
 consumes = ["first"]
-operator = "subprocess"
+operator = "shell"
 [node.params]
-argv = ["sh", "-c", "cat >/dev/null; printf '{\"n\": %s}' \"$0\"", "{{ upstream.first.n }}"]
+command = "printf '{\"n\": {{ upstream.first.n }}}'"

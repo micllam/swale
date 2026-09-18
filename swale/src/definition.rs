@@ -20,6 +20,9 @@
 //! argv = ["python", "tasks/extract.py"]
 //! ```
 //!
+//! The operators are `subprocess`, `shell` and `http` ([`crate::operator`]),
+//! and each documents its parameters.
+//!
 //! A graph with a `schedule` declares `partition` as `daily` or `hourly`,
 //! because every firing runs a partition of its own (see [`crate::daemon`]).
 //! The `schedule` is a [`taquba_cron::Expression`]: a step follows a range or

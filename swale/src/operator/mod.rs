@@ -3,7 +3,8 @@
 //!
 //! An [`OperatorSet`] maps an operator name to a parameter check and, for an
 //! operator the process runs, to an [`Operator`]. [`OperatorSet::builtin`]
-//! contains the operators of this crate, and a consumer adds its own with
+//! contains the operators of this crate, which the submodules [`subprocess`],
+//! [`shell`] and [`http`] implement, and a consumer adds its own with
 //! [`OperatorSet::add`] or, for a check alone, [`OperatorSet::register`].
 
 use std::collections::BTreeMap;
@@ -11,14 +12,21 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use taquba_workflow::{Step, StepError};
 
-use crate::subprocess::Subprocess;
 use crate::task::TaskIdentity;
+
+pub mod http;
+pub mod shell;
+pub mod subprocess;
+
+use http::Http;
+use shell::Shell;
+use subprocess::Subprocess;
 
 /// One task instance as an operator sees it.
 #[derive(Debug, Clone, Copy)]
@@ -90,10 +98,12 @@ impl OperatorSet {
         Self::default()
     }
 
-    /// The operators of this crate: `subprocess`.
+    /// The operators of this crate: `subprocess`, `shell` and `http`.
     pub fn builtin() -> Self {
         let mut set = Self::new();
         set.add("subprocess", Subprocess::default());
+        set.add("shell", Shell::default());
+        set.add("http", Http::default());
         set
     }
 
@@ -171,6 +181,20 @@ impl OperatorSet {
     }
 }
 
+/// Extends the lease of `step` to `extension` every `interval` while the
+/// operator waits on an external process or call, and returns the error of
+/// an extension that failed.
+pub(crate) async fn keep_lease(step: &Step, extension: Duration, interval: Duration) -> StepError {
+    let mut ticks = tokio::time::interval(interval);
+    ticks.tick().await;
+    loop {
+        ticks.tick().await;
+        if let Err(e) = step.lease.ensure_at_least(extension) {
+            return StepError::transient(format!("lease extension failed: {e}"));
+        }
+    }
+}
+
 fn check_fn<P: DeserializeOwned + 'static>() -> Check {
     Box::new(|params: &toml::Table| {
         P::deserialize(params.clone())
@@ -185,25 +209,6 @@ impl fmt::Debug for OperatorSet {
     }
 }
 
-/// Parameters of the `subprocess` operator: a program and its arguments.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SubprocessParams {
-    /// The program followed by its arguments. It must not be empty.
-    #[serde(deserialize_with = "non_empty_argv")]
-    pub argv: Vec<String>,
-}
-
-fn non_empty_argv<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<String>, D::Error> {
-    let argv = Vec::<String>::deserialize(deserializer)?;
-    if argv.is_empty() {
-        return Err(serde::de::Error::custom("argv must not be empty"));
-    }
-    Ok(argv)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,12 +219,22 @@ mod tests {
     }
 
     #[test]
-    fn builtin_set_runs_the_subprocess_operator() {
+    fn builtin_set_runs_the_three_operators() {
         let set = OperatorSet::builtin();
-        assert_eq!(set.names().collect::<Vec<_>>(), ["subprocess"]);
-        assert!(set.runs("subprocess"));
+        assert_eq!(
+            set.names().collect::<Vec<_>>(),
+            ["http", "shell", "subprocess"]
+        );
+        for name in ["http", "shell", "subprocess"] {
+            assert!(set.runs(name), "{name}");
+        }
         assert_eq!(
             set.check("subprocess", &table(r#"argv = ["python", "x.py"]"#)),
+            Ok(())
+        );
+        assert_eq!(set.check("shell", &table(r#"command = "true""#)), Ok(()));
+        assert_eq!(
+            set.check("http", &table(r#"url = "https://example.test/""#)),
             Ok(())
         );
     }
@@ -248,7 +263,7 @@ mod tests {
 
     #[test]
     fn register_adds_a_check_only_operator() {
-        #[derive(Deserialize)]
+        #[derive(serde::Deserialize)]
         struct Params {
             #[allow(dead_code)]
             query: String,
@@ -263,7 +278,7 @@ mod tests {
 
     struct Echo;
 
-    #[derive(Deserialize)]
+    #[derive(serde::Deserialize)]
     struct EchoParams {
         text: String,
     }

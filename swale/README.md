@@ -24,17 +24,19 @@ partition = "daily"
 [[node]]
 name = "extract"
 produces = "orders_raw"
-operator = "subprocess"
+operator = "shell"
 [node.params]
-argv = ["python", "tasks/extract.py"]
+command = "dbt run --select orders_raw >&2 && printf '{\"table\": \"orders_raw\"}'"
 
 [[node]]
 name = "load"
 produces = "orders_warehouse"
 consumes = ["orders_raw"]
-operator = "subprocess"
+operator = "http"
 [node.params]
-argv = ["python", "tasks/load.py", "{{ upstream.extract.rows_key }}"]
+method = "POST"
+url = "https://warehouse.example/load"
+body = '{"table": "{{ upstream.extract.table }}"}'
 ```
 
 The [`definition` module](https://docs.rs/swale/latest/swale/definition/)
@@ -54,6 +56,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## Operators
+
+An operator runs a node, and its parameters are the `params` table of the
+node. The output of a node is JSON, and a downstream template reads a path
+into it with `{{ upstream.<node>.<path> }}`.
+
+- **`subprocess`** runs `argv` with a JSON document on stdin (the identity,
+  the parameters and the upstream outputs) and reads the output from stdout.
+- **`shell`** runs `command` with `sh -c`, with the identity in `SWALE_*`
+  variables, the upstream outputs in `SWALE_INPUTS` and the `env` table in
+  the environment, and reads the output from stdout.
+- **`http`** sends `method`, `url`, `headers` and `body` within `timeout`
+  and outputs `{"status": <code>, "body": <value>}`, with a JSON body parsed.
+
+Exit code 0 and a 2xx status are success. Exit code 75, a 5xx status, a 429
+status, a connection failure and a timeout are transient errors, retried up
+to `retries` times. Any other exit code or status is a permanent error,
+which dead-letters the task instance. A program or a request must be
+idempotent per attempt.
 
 ## Schedule
 

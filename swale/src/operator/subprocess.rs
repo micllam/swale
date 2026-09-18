@@ -8,21 +8,43 @@
 //! signal or a program that cannot start is a permanent error. Stderr is
 //! logged, and its tail is included in an error message. The program must be
 //! idempotent per attempt.
+//!
+//! The `shell` operator ([`super::shell`]) runs a command line with the same
+//! exit code protocol.
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use taquba_workflow::StepError;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use crate::operator::{Operator, Outcome, SubprocessParams, Task};
+use super::{Operator, Outcome, Task, keep_lease};
 
 /// Exit code for a transient failure.
 pub const EX_TEMPFAIL: i32 = 75;
+
+/// Parameters of the `subprocess` operator: a program and its arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubprocessParams {
+    /// The program followed by its arguments. It must not be empty.
+    #[serde(deserialize_with = "non_empty_argv")]
+    pub argv: Vec<String>,
+}
+
+fn non_empty_argv<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error> {
+    let argv = Vec::<String>::deserialize(deserializer)?;
+    if argv.is_empty() {
+        return Err(serde::de::Error::custom("argv must not be empty"));
+    }
+    Ok(argv)
+}
 
 /// The `subprocess` operator.
 #[derive(Debug, Clone)]
@@ -57,19 +79,8 @@ impl Operator for Subprocess {
     type Params = SubprocessParams;
 
     async fn run(&self, task: &Task<'_>, params: SubprocessParams) -> Result<Outcome, StepError> {
-        let run_id = task.identity.run_id();
-        let program = &params.argv[0];
-        let mut child = Command::new(program)
-            .args(&params.argv[1..])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| StepError::permanent(format!("cannot start `{program}`: {e}")))?;
-
         let document = serde_json::to_vec(&StdinDocument {
-            run_id: run_id.as_str(),
+            run_id: task.identity.run_id().as_str(),
             graph: &task.identity.graph,
             partition: task.identity.partition.as_str(),
             node: &task.identity.node,
@@ -78,77 +89,108 @@ impl Operator for Subprocess {
             inputs: task.inputs,
         })
         .expect("the stdin document serializes to JSON");
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        let mut stdout = child.stdout.take().expect("stdout is piped");
-        let mut stderr = child.stderr.take().expect("stderr is piped");
-        let output = tokio::spawn(async move {
-            let mut out = Vec::new();
-            let mut err = Vec::new();
-            let _ = stdout.read_to_end(&mut out).await;
-            let _ = stderr.read_to_end(&mut err).await;
-            (out, err)
-        });
+        let mut command = Command::new(&params.argv[0]);
+        command.args(&params.argv[1..]);
+        run_program(
+            task,
+            command,
+            Some(document),
+            self.lease_extension,
+            self.lease_interval,
+        )
+        .await
+    }
+}
+
+/// Runs `command` to its end with the exit code protocol. `stdin` is written
+/// to the program and closed, or stdin is closed at the start. The lease is
+/// extended while the program runs, and a cancellation of the run kills the
+/// program.
+pub(crate) async fn run_program(
+    task: &Task<'_>,
+    mut command: Command,
+    stdin: Option<Vec<u8>>,
+    lease_extension: Duration,
+    lease_interval: Duration,
+) -> Result<Outcome, StepError> {
+    let run_id = task.identity.run_id();
+    let program = command
+        .as_std()
+        .get_program()
+        .to_string_lossy()
+        .into_owned();
+    let mut child = command
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| StepError::permanent(format!("cannot start `{program}`: {e}")))?;
+
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let output = tokio::spawn(async move {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let _ = stdout.read_to_end(&mut out).await;
+        let _ = stderr.read_to_end(&mut err).await;
+        (out, err)
+    });
+    if let Some(document) = stdin {
+        let mut pipe = child.stdin.take().expect("stdin is piped");
         // A program that ignores stdin closes the pipe. The write error is
         // then expected and is dropped.
-        let _ = stdin.write_all(&document).await;
-        drop(stdin);
+        let _ = pipe.write_all(&document).await;
+    }
 
-        let lease = async {
-            let mut interval = tokio::time::interval(self.lease_interval);
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                task.step
-                    .lease
-                    .ensure_at_least(self.lease_extension)
-                    .map_err(|e| StepError::transient(format!("lease extension failed: {e}")))?;
-            }
-        };
-        let status = tokio::select! {
-            status = child.wait() => status
-                .map_err(|e| StepError::permanent(format!("cannot wait for `{program}`: {e}")))?,
-            Err::<std::convert::Infallible, _>(e) = lease => return Err(e),
-            () = task.step.cancel_token.cancelled() => {
-                let _ = child.kill().await;
-                return Err(StepError::transient("the run was cancelled while the program ran"));
-            }
-        };
-        let (out, err) = output.await.map_err(|e| {
-            StepError::permanent(format!("cannot read the output of `{program}`: {e}"))
-        })?;
-        if !err.is_empty() {
-            tracing::info!(run_id = %run_id, program, stderr = %String::from_utf8_lossy(&err), "subprocess stderr");
+    let status = tokio::select! {
+        status = child.wait() => status
+            .map_err(|e| StepError::permanent(format!("cannot wait for `{program}`: {e}")))?,
+        e = keep_lease(task.step, lease_extension, lease_interval) => return Err(e),
+        () = task.step.cancel_token.cancelled() => {
+            let _ = child.kill().await;
+            return Err(StepError::transient("the run was cancelled while the program ran"));
         }
-        let tail = || {
-            let text = String::from_utf8_lossy(&err);
-            let start = text.len().saturating_sub(512);
-            text[text.floor_char_boundary(start)..].to_string()
-        };
-        match status.code() {
-            Some(0) => {
-                let trimmed = out.trim_ascii();
-                if trimmed.is_empty() {
-                    return Ok(Outcome::Succeeded(Value::Null));
-                }
-                serde_json::from_slice(trimmed)
-                    .map(Outcome::Succeeded)
-                    .map_err(|e| {
-                        StepError::permanent(format!("stdout of `{program}` is not JSON: {e}"))
-                    })
+    };
+    let (out, err) = output
+        .await
+        .map_err(|e| StepError::permanent(format!("cannot read the output of `{program}`: {e}")))?;
+    if !err.is_empty() {
+        tracing::info!(run_id = %run_id, program, stderr = %String::from_utf8_lossy(&err), "program stderr");
+    }
+    let tail = || {
+        let text = String::from_utf8_lossy(&err);
+        let start = text.len().saturating_sub(512);
+        text[text.floor_char_boundary(start)..].to_string()
+    };
+    match status.code() {
+        Some(0) => {
+            let trimmed = out.trim_ascii();
+            if trimmed.is_empty() {
+                return Ok(Outcome::Succeeded(Value::Null));
             }
-            Some(EX_TEMPFAIL) => Err(StepError::transient(format!(
-                "`{program}` exited with {EX_TEMPFAIL}: {}",
-                tail()
-            ))),
-            Some(code) => Err(StepError::permanent(format!(
-                "`{program}` exited with {code}: {}",
-                tail()
-            ))),
-            None => Err(StepError::permanent(format!(
-                "`{program}` was terminated by a signal: {}",
-                tail()
-            ))),
+            serde_json::from_slice(trimmed)
+                .map(Outcome::Succeeded)
+                .map_err(|e| {
+                    StepError::permanent(format!("stdout of `{program}` is not JSON: {e}"))
+                })
         }
+        Some(EX_TEMPFAIL) => Err(StepError::transient(format!(
+            "`{program}` exited with {EX_TEMPFAIL}: {}",
+            tail()
+        ))),
+        Some(code) => Err(StepError::permanent(format!(
+            "`{program}` exited with {code}: {}",
+            tail()
+        ))),
+        None => Err(StepError::permanent(format!(
+            "`{program}` was terminated by a signal: {}",
+            tail()
+        ))),
     }
 }
 

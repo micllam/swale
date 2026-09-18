@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which read the graphs, the graph runs, the node states and the queues of a
   store through a `QueueReader`. The commands only read from the store, so
   they can run alongside a daemon.
+- The `shell` operator, which runs a command line with `sh -c` with the
+  identity of the task instance and the upstream outputs in the environment,
+  and the `http` operator, which sends one request and outputs the status and
+  the body. Both are in `OperatorSet::builtin`. The crate depends on
+  `reqwest` with `rustls`, as the object store does for a cloud backend.
 - The `swale start`, `swale rerun` and `swale cancel` commands and the
   `Request` type, which write a request object to the store for the daemon,
   and the request record at `swale/requests/{id}`, which the daemon writes
@@ -55,6 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `5-59/5 * * * *`, and remove the prefix to keep the earlier firing times.
 - **Breaking:** `Graph::schedule` returns the parsed `taquba_cron::Expression`.
   Call `to_string` on the value for the text, which the parser normalises.
+- **Breaking:** the operators are submodules of `operator`. Import
+  `Subprocess` and `SubprocessParams` from `swale::operator::subprocess`.
 - **Breaking:** `scheduler::Error` has the variants `Definition`,
   `UnknownGraph`, `NoPartition` and `ObjectStore`. Add a wildcard arm to an
   exhaustive match.
