@@ -15,9 +15,11 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use taquba::object_store::path::Path as ObjectPath;
-use taquba::object_store::{self, ObjectStore, ObjectStoreExt};
+use taquba::object_store::{self, ObjectStore};
 
 use crate::partition::Partition;
+use crate::records::JsonBytes;
+use crate::store::ObjectPrefix;
 
 /// Maximum length of a request id in bytes.
 pub const MAX_REQUEST_ID_LEN: usize = 64;
@@ -107,33 +109,19 @@ pub enum Request {
     },
 }
 
-impl Request {
-    /// The JSON form of the request.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("a request serializes to JSON")
-    }
-
-    /// Parses the JSON form of the request.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
-    }
-}
+impl JsonBytes for Request {}
 
 /// The request objects of a deployment.
 pub struct RequestStore {
-    store: Arc<dyn ObjectStore>,
-    root: String,
+    objects: ObjectPrefix,
 }
 
 impl RequestStore {
     /// A request store within `store_prefix` of `store`.
     pub fn new(store: Arc<dyn ObjectStore>, store_prefix: &str) -> Self {
-        let root = if store_prefix.is_empty() {
-            "requests".to_string()
-        } else {
-            format!("{store_prefix}/requests")
-        };
-        RequestStore { store, root }
+        RequestStore {
+            objects: ObjectPrefix::new(store, store_prefix, "requests"),
+        }
     }
 
     /// Writes the object of `request` with `id`.
@@ -142,19 +130,15 @@ impl RequestStore {
         id: &RequestId,
         request: &Request,
     ) -> Result<(), object_store::Error> {
-        self.store
-            .put(&self.path(id), request.to_bytes().into())
-            .await?;
-        Ok(())
+        self.objects.put(&self.path(id), request.to_bytes()).await
     }
 
     /// The request objects, in id order, with the bytes of each. An object
     /// whose name is not a request id is skipped.
     pub async fn list(&self) -> Result<Vec<(RequestId, Vec<u8>)>, object_store::Error> {
-        let prefix = ObjectPath::from(self.root.as_str());
-        let listing = self.store.list_with_delimiter(Some(&prefix)).await?;
+        let prefix = ObjectPath::from(self.objects.prefix());
         let mut requests = Vec::new();
-        for object in listing.objects {
+        for object in self.objects.list(&prefix).await? {
             let Some(id) = object
                 .location
                 .filename()
@@ -163,13 +147,10 @@ impl RequestStore {
                 tracing::warn!(object = %object.location, "the object is not a request");
                 continue;
             };
-            let bytes = match self.store.get(&object.location).await {
-                Ok(result) => result.bytes().await?,
-                // Removed between the listing and the read.
-                Err(object_store::Error::NotFound { .. }) => continue,
-                Err(e) => return Err(e),
-            };
-            requests.push((id, bytes.to_vec()));
+            // An object removed between the listing and the read is skipped.
+            if let Some(bytes) = self.objects.get(&object.location).await? {
+                requests.push((id, bytes));
+            }
         }
         requests.sort();
         Ok(requests)
@@ -178,20 +159,18 @@ impl RequestStore {
     /// Removes the object of the request `id`. An absent object is not an
     /// error.
     pub async fn remove(&self, id: &RequestId) -> Result<(), object_store::Error> {
-        match self.store.delete(&self.path(id)).await {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(e) => Err(e),
-        }
+        self.objects.delete(&self.path(id)).await
     }
 
     fn path(&self, id: &RequestId) -> ObjectPath {
-        ObjectPath::from(format!("{}/{id}", self.root))
+        self.objects.path(id.as_str())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use taquba::object_store::ObjectStoreExt;
     use taquba::object_store::memory::InMemory;
 
     #[test]

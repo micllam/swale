@@ -69,7 +69,8 @@ into it with `{{ upstream.<node>.<path> }}`.
   variables, the upstream outputs in `SWALE_INPUTS` and the `env` table in
   the environment, and reads the output from stdout.
 - **`http`** sends `method`, `url`, `headers` and `body` within `timeout`
-  and outputs `{"status": <code>, "body": <value>}`, with a JSON body parsed.
+  and outputs `{"status": <code>, "body": <value>}`, with a JSON body
+  parsed.
 
 Exit code 0 and a 2xx status are success. Exit code 75, a 5xx status, a 429
 status, a connection failure and a timeout are transient errors, retried up

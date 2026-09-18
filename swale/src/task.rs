@@ -53,16 +53,18 @@ pub enum IdentityError {
     Rerun(String),
 }
 
-impl TaskIdentity {
-    /// The run id `{graph}-{partition}-{node}-r{rerun}`. The graph and node
-    /// names are bounded by the graph checks so that the id is within the
-    /// runtime's limit.
-    pub fn run_id(&self) -> RunId {
-        RunId::new(format!(
-            "{}-{}-{}-r{}",
-            self.graph, self.partition, self.node, self.rerun
-        ))
+/// The run id `{graph}-{partition}-{node}-r{rerun}` of a task instance. The
+/// graph and node names are bounded by the graph checks so that the id is
+/// within the runtime's limit.
+pub fn run_id(graph: &str, partition: &Partition, node: &str, rerun: u32) -> RunId {
+    RunId::new(format!("{graph}-{partition}-{node}-r{rerun}"))
         .expect("graph and node names are bounded so that every run id is valid")
+}
+
+impl TaskIdentity {
+    /// The run id of the task instance (see [`run_id`]).
+    pub fn run_id(&self) -> RunId {
+        run_id(&self.graph, &self.partition, &self.node, self.rerun)
     }
 
     /// The `swale.` headers of the run.
@@ -102,10 +104,12 @@ impl TaskIdentity {
     /// The KV key of the node's record: the asset record of an asset node or
     /// the task record of a task node (see [`records`]).
     pub fn record_key(&self) -> Vec<u8> {
-        match &self.asset {
-            Some(asset) => records::asset_key(asset, &self.partition),
-            None => records::task_key(&self.graph, &self.partition, &self.node),
-        }
+        records::record_key(
+            &self.graph,
+            &self.partition,
+            &self.node,
+            self.asset.as_deref(),
+        )
     }
 }
 

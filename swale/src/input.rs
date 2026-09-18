@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::graph::Node;
-use crate::records::{NodeRecord, RecordStatus};
+use crate::records::{JsonBytes, NodeRecord, RecordStatus};
 use crate::task::TaskIdentity;
 use crate::template::{RenderContext, RenderError, Template};
 
@@ -36,44 +36,32 @@ pub struct UpstreamSummary {
     pub error: Option<String>,
 }
 
+impl JsonBytes for TaskInput {}
+
 impl TaskInput {
     /// The input of `node` given the records of its upstreams.
     pub fn new(node: &Node, upstream_records: &BTreeMap<String, NodeRecord>) -> Self {
         let params = serde_json::to_value(node.params()).expect("a TOML table serializes to JSON");
-        let inputs = upstream_records
-            .iter()
-            .filter(|(_, record)| record.status == RecordStatus::Succeeded)
-            .map(|(name, record)| (name.clone(), record.output.clone().unwrap_or(Value::Null)))
-            .collect();
-        let upstreams = upstream_records
-            .iter()
-            .map(|(name, record)| {
-                (
-                    name.clone(),
-                    UpstreamSummary {
-                        status: record.status,
-                        error: record.error.clone(),
-                    },
-                )
-            })
-            .collect();
+        let mut inputs = BTreeMap::new();
+        let mut upstreams = BTreeMap::new();
+        for (name, record) in upstream_records {
+            if record.status == RecordStatus::Succeeded {
+                inputs.insert(name.clone(), record.output.clone().unwrap_or(Value::Null));
+            }
+            upstreams.insert(
+                name.clone(),
+                UpstreamSummary {
+                    status: record.status,
+                    error: record.error.clone(),
+                },
+            );
+        }
         TaskInput {
             operator: node.operator().to_string(),
             params,
             inputs,
             upstreams,
         }
-    }
-
-    /// The JSON form of the input. Maps are in key order, so the same node
-    /// and records produce the same bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("an input serializes to JSON")
-    }
-
-    /// Parses the JSON form of the input.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
     }
 
     /// The summary of the graph run for `{{ run.summary }}`: the graph, the

@@ -181,18 +181,44 @@ impl OperatorSet {
     }
 }
 
-/// Extends the lease of `step` to `extension` every `interval` while the
-/// operator waits on an external process or call, and returns the error of
-/// an extension that failed.
-pub(crate) async fn keep_lease(step: &Step, extension: Duration, interval: Duration) -> StepError {
-    let mut ticks = tokio::time::interval(interval);
+/// The lease extension of an operator that waits on an external process
+/// or call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lease {
+    /// The time the lease is extended to at each extension.
+    pub extension: Duration,
+    /// The time between extensions.
+    pub interval: Duration,
+}
+
+impl Default for Lease {
+    /// An extension to 60 seconds every 20 seconds.
+    fn default() -> Self {
+        Lease {
+            extension: Duration::from_secs(60),
+            interval: Duration::from_secs(20),
+        }
+    }
+}
+
+/// Extends the lease of `step` by `lease` while the operator waits, and
+/// returns the error of an extension that failed.
+pub(crate) async fn keep_lease(step: &Step, lease: Lease) -> StepError {
+    let mut ticks = tokio::time::interval(lease.interval);
     ticks.tick().await;
     loop {
         ticks.tick().await;
-        if let Err(e) = step.lease.ensure_at_least(extension) {
+        if let Err(e) = step.lease.ensure_at_least(lease.extension) {
             return StepError::transient(format!("lease extension failed: {e}"));
         }
     }
+}
+
+/// The last 512 bytes of `bytes` as text, for an error message.
+pub(crate) fn tail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let start = text.len().saturating_sub(512);
+    text[text.floor_char_boundary(start)..].to_string()
 }
 
 fn check_fn<P: DeserializeOwned + 'static>() -> Check {

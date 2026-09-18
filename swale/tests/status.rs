@@ -4,15 +4,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use swale::JsonBytes;
 use swale::records::{GraphRunState, graph_key};
 use swale::{
-    DefinitionStore, EVENTS_QUEUE, GraphRecord, NodeState, OperatorSet, Partition, Pools,
-    RecordHook, RunCounts, Scheduler, SchedulerOptions, StatusReader,
+    DefinitionStore, GraphRecord, NodeState, OperatorSet, Partition, Pools, RecordHook, RunCounts,
+    Scheduler, SchedulerOptions, StatusReader,
 };
 use taquba::object_store::ObjectStore;
-use taquba::object_store::memory::InMemory;
-use taquba::{MockClock, OpenOptions, Queue, QueueConfig};
+use taquba::{MockClock, Queue};
 use tokio_util::sync::CancellationToken;
+
+mod common;
 
 const PARTITION: &str = "20260915";
 const START_MS: u64 = 1_700_000_000_000;
@@ -68,22 +70,11 @@ struct Harness {
 
 impl Harness {
     async fn start(spawn_workers: bool) -> Harness {
-        let clock = MockClock::new(START_MS);
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let opts = OpenOptions::default()
-            .clock(Arc::new(clock))
-            .default_queue_config(QueueConfig::default().retry_backoff_base(Duration::ZERO))
-            .reaper_interval(Duration::from_millis(10))
-            .scheduler_interval(Duration::from_millis(10));
-        let queue = Arc::new(
-            Queue::open_with_options(store.clone(), "test", opts)
-                .await
-                .unwrap(),
-        );
+        let (store, queue) = common::open_queue(MockClock::new(START_MS)).await;
         let operators = Arc::new(OperatorSet::builtin());
         let definitions = Arc::new(DefinitionStore::new(store.clone(), "", operators.clone()));
         let (hash, _) = definitions.put(DEFINITION).await.unwrap();
-        let hook = RecordHook::new(queue.clock(), EVENTS_QUEUE);
+        let hook = RecordHook::new(queue.clock());
         let pools = Arc::new(
             Pools::builder(queue.clone(), store.clone(), operators, hook)
                 .poll_interval(Duration::from_millis(10))
@@ -123,28 +114,31 @@ impl Harness {
     }
 
     async fn reader(&self) -> StatusReader {
-        StatusReader::open(self.store.clone(), "test", self.definitions.clone())
-            .await
-            .unwrap()
+        StatusReader::open(
+            self.store.clone(),
+            common::QUEUE_PATH,
+            self.definitions.clone(),
+        )
+        .await
+        .unwrap()
     }
 
     /// A reader whose view includes the graph run in `state`. A reader sees
     /// a write after the writer flushes it, so the open repeats until then.
     async fn reader_at(&self, state: GraphRunState) -> StatusReader {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            let reader = self.reader().await;
-            let runs = reader.runs("orders").await.unwrap();
-            if runs.first().is_some_and(|run| run.record.state == state) {
-                return reader;
-            }
-            reader.close().await.unwrap();
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "no reader saw the graph run in {state:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        common::wait_until(
+            &format!("no reader saw the graph run in {state:?}"),
+            async || {
+                let reader = self.reader().await;
+                let runs = reader.runs("orders").await.unwrap();
+                if runs.first().is_some_and(|run| run.record.state == state) {
+                    return Some(reader);
+                }
+                reader.close().await.unwrap();
+                None
+            },
+        )
+        .await
     }
 }
 
@@ -233,7 +227,12 @@ async fn a_failed_run_reads_with_its_counts_its_blocked_node_and_its_dead_job() 
         .find(|stats| stats.queue == "swale-pool-default")
         .unwrap();
     assert_eq!(pool.dead, 1);
-    let dead = reader.dead_jobs("swale-pool-default", 10).await.unwrap();
+    assert!(reader.dead_jobs("nope", 10).await.unwrap().is_none());
+    let dead = reader
+        .dead_jobs("swale-pool-default", 10)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(dead.len(), 1);
     assert_eq!(
         dead[0].headers[taquba_workflow::HEADER_RUN_ID],

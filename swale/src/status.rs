@@ -21,14 +21,11 @@ use crate::definition_store::{DefinitionError, DefinitionStore};
 use crate::graph::{Graph, Node, TriggerRule};
 use crate::partition::Partition;
 use crate::records::{
-    self, GRAPH_RUNS_PREFIX, GRAPHS_PREFIX, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord,
-    RecordStatus, RequestRecord,
+    self, Entry, GRAPH_RUNS_PREFIX, GRAPHS_PREFIX, GraphRecord, GraphRunRecord, GraphRunState,
+    NodeRecord, ReadError, RecordError, RecordStatus, RequestRecord,
 };
 use crate::request::RequestId;
 use crate::scheduler::is_ready;
-
-/// The entries of one scan page.
-const PAGE: usize = 256;
 
 /// A failure of a status read.
 #[derive(Debug, thiserror::Error)]
@@ -40,16 +37,20 @@ pub enum Error {
     #[error(transparent)]
     Definition(#[from] DefinitionError),
     /// A record is not valid JSON.
-    #[error("record `{key}` is not a record: {source}")]
-    Record {
-        /// The key.
-        key: String,
-        /// The parser's error.
-        source: serde_json::Error,
-    },
+    #[error(transparent)]
+    Record(#[from] RecordError),
     /// The graph run records a definition the store does not have.
     #[error("definition `{0}` is not in the definition store")]
     UnknownDefinition(String),
+}
+
+impl From<ReadError> for Error {
+    fn from(e: ReadError) -> Self {
+        match e {
+            ReadError::Queue(e) => Error::Queue(e),
+            ReadError::Record(e) => Error::Record(e),
+        }
+    }
 }
 
 /// The state of a node in a graph run.
@@ -134,12 +135,7 @@ pub fn node_states(
             let Some(upstreams) = upstreams else {
                 continue;
             };
-            let upstream_records = node
-                .upstreams()
-                .iter()
-                .filter_map(|name| Some((name.clone(), records.get(name)?.clone())))
-                .collect();
-            let state = if is_ready(node, &upstream_records) {
+            let state = if is_ready(node, records) {
                 NodeState::Ready
             } else if can_become_ready(node, &upstreams) {
                 NodeState::Waiting
@@ -256,18 +252,20 @@ impl StatusReader {
     /// Every graph with a graph record or a graph run, by name.
     pub async fn graphs(&self) -> Result<Vec<GraphStatus>, Error> {
         let mut graphs: BTreeMap<String, GraphStatus> = BTreeMap::new();
-        for (key, bytes) in self.scan(GRAPHS_PREFIX.as_bytes()).await? {
+        let adopted: Vec<Entry<GraphRecord>> =
+            records::scan(&self.reader, GRAPHS_PREFIX.as_bytes()).await?;
+        for Entry { key, record, .. } in adopted {
             let Some(name) = records::parse_graph_key(&key) else {
                 continue;
             };
-            let record = parse(&key, &bytes, GraphRecord::from_bytes)?;
             graph_entry(&mut graphs, &name).adopted = Some(record);
         }
-        for (key, bytes) in self.scan(GRAPH_RUNS_PREFIX.as_bytes()).await? {
+        let runs: Vec<Entry<GraphRunRecord>> =
+            records::scan(&self.reader, GRAPH_RUNS_PREFIX.as_bytes()).await?;
+        for Entry { key, record, .. } in runs {
             let Some((name, partition)) = records::parse_graph_run_key(&key) else {
                 continue;
             };
-            let record = parse(&key, &bytes, GraphRunRecord::from_bytes)?;
             let graph = graph_entry(&mut graphs, &name);
             match record.state {
                 GraphRunState::Active => graph.runs.active += 1,
@@ -286,11 +284,12 @@ impl StatusReader {
     pub async fn runs(&self, graph: &str) -> Result<Vec<RunSummary>, Error> {
         let prefix = format!("{GRAPH_RUNS_PREFIX}{graph}/");
         let mut runs = Vec::new();
-        for (key, bytes) in self.scan(prefix.as_bytes()).await? {
+        let entries: Vec<Entry<GraphRunRecord>> =
+            records::scan(&self.reader, prefix.as_bytes()).await?;
+        for Entry { key, record, .. } in entries {
             let Some((_, partition)) = records::parse_graph_run_key(&key) else {
                 continue;
             };
-            let record = parse(&key, &bytes, GraphRunRecord::from_bytes)?;
             runs.push(RunSummary { partition, record });
         }
         Ok(runs)
@@ -304,10 +303,9 @@ impl StatusReader {
         partition: &Partition,
     ) -> Result<Option<GraphRunStatus>, Error> {
         let key = records::graph_run_key(graph, partition);
-        let Some(bytes) = self.reader.kv_get(&key).await? else {
+        let Some(record) = records::read::<GraphRunRecord>(&self.reader, &key).await? else {
             return Ok(None);
         };
-        let record = parse(&key, &bytes, GraphRunRecord::from_bytes)?;
         let definition = self
             .definitions
             .get(&record.definition)
@@ -316,8 +314,7 @@ impl StatusReader {
         let mut node_records = BTreeMap::new();
         for node in definition.nodes() {
             let key = records::node_record_key(graph, partition, node);
-            if let Some(bytes) = self.reader.kv_get(&key).await? {
-                let node_record = parse(&key, &bytes, NodeRecord::from_bytes)?;
+            if let Some(node_record) = records::read::<NodeRecord>(&self.reader, &key).await? {
                 node_records.insert(node.name().to_string(), node_record);
             }
         }
@@ -343,11 +340,7 @@ impl StatusReader {
     /// The record of the request `id`, or `None` while the daemon did not
     /// apply the request.
     pub async fn request(&self, id: &RequestId) -> Result<Option<RequestRecord>, Error> {
-        let key = records::request_key(id);
-        let Some(bytes) = self.reader.kv_get(&key).await? else {
-            return Ok(None);
-        };
-        parse(&key, &bytes, RequestRecord::from_bytes).map(Some)
+        Ok(records::read(&self.reader, &records::request_key(id)).await?)
     }
 
     /// The job counts of every queue of the store, by queue name.
@@ -361,31 +354,22 @@ impl StatusReader {
         Ok(stats)
     }
 
-    /// The first `limit` dead jobs of `queue`, in enqueue order.
-    pub async fn dead_jobs(&self, queue: &str, limit: usize) -> Result<Vec<JobRecord>, Error> {
-        Ok(self.reader.dead_jobs(queue, None, limit).await?)
+    /// The first `limit` dead jobs of `queue`, in enqueue order, or `None`
+    /// when the store does not have the queue.
+    pub async fn dead_jobs(
+        &self,
+        queue: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<JobRecord>>, Error> {
+        if !self.reader.list_queues().await?.iter().any(|q| q == queue) {
+            return Ok(None);
+        }
+        Ok(Some(self.reader.dead_jobs(queue, None, limit).await?))
     }
 
     /// Closes the reader.
     pub async fn close(self) -> Result<(), Error> {
         Ok(self.reader.close().await?)
-    }
-
-    async fn scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
-        let mut entries = Vec::new();
-        let mut cursor: Option<Vec<u8>> = None;
-        loop {
-            let page = self.reader.kv_scan(prefix, cursor.as_deref(), PAGE).await?;
-            entries.extend(
-                page.entries
-                    .into_iter()
-                    .map(|(key, value)| (key, value.to_vec())),
-            );
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => return Ok(entries),
-            }
-        }
     }
 }
 
@@ -401,17 +385,6 @@ fn graph_entry<'a>(
             runs: RunCounts::default(),
             latest: None,
         })
-}
-
-fn parse<T>(
-    key: &[u8],
-    bytes: &[u8],
-    from_bytes: fn(&[u8]) -> Result<T, serde_json::Error>,
-) -> Result<T, Error> {
-    from_bytes(bytes).map_err(|source| Error::Record {
-        key: String::from_utf8_lossy(key).into_owned(),
-        source,
-    })
 }
 
 #[cfg(test)]

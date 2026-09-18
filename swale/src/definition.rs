@@ -106,10 +106,6 @@ pub fn load_str(text: &str, operators: &OperatorSet) -> Result<Graph, Error> {
         })
         .collect();
 
-    if !problems.is_empty() {
-        return Err(Error::Invalid(problems));
-    }
-
     let spec = GraphSpec {
         name: file.graph.name,
         schedule: file.graph.schedule,
@@ -117,7 +113,14 @@ pub fn load_str(text: &str, operators: &OperatorSet) -> Result<Graph, Error> {
         partitioning: file.graph.partition.into(),
         nodes,
     };
-    Graph::build(spec, operators).map_err(Error::Invalid)
+    match Graph::build(spec, operators) {
+        Ok(graph) if problems.is_empty() => Ok(graph),
+        Ok(_) => Err(Error::Invalid(problems)),
+        Err(more) => {
+            problems.extend(more);
+            Err(Error::Invalid(problems))
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -296,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_catchup_is_a_problem() {
+    fn invalid_catchup_is_a_problem_reported_with_the_graph_faults() {
         let text = MINIMAL.replace("name = \"g\"", "name = \"g\"\ncatchup = \"7w\"");
         assert_eq!(
             problems(&text),
@@ -304,6 +307,13 @@ mod tests {
                 "`7w` is not a duration such as `30s`, `5m`, `6h` or `7d`".into()
             )]
         );
+        // A fault of the file and a fault of the graph are in one report,
+        // the file's first.
+        let text = text.replace("operator = \"subprocess\"", "operator = \"sql\"");
+        assert!(matches!(
+            problems(&text).as_slice(),
+            [Problem::InvalidCatchup(_), Problem::UnknownOperator { .. }]
+        ));
     }
 
     #[test]

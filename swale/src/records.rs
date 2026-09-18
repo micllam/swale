@@ -8,7 +8,13 @@
 //!   node.
 //! - `swale/requests/{id}`: the [`RequestRecord`] of an applied request.
 
+use std::any::type_name;
+use std::future::Future;
+
+use bytes::Bytes;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use taquba::{KvPage, Queue, QueueReader};
 use taquba_workflow::TerminalStatus;
 
 use crate::graph::Node;
@@ -70,9 +76,15 @@ pub fn request_key(id: &RequestId) -> Vec<u8> {
 /// The key of the record of `node` for `partition`: the asset key of an asset
 /// node or the task key of a task node.
 pub fn node_record_key(graph: &str, partition: &Partition, node: &Node) -> Vec<u8> {
-    match node.asset() {
+    record_key(graph, partition, node.name(), node.asset())
+}
+
+/// The key of the record of the node `node` for `partition`: the asset key
+/// when the node produces `asset`, the task key otherwise.
+pub fn record_key(graph: &str, partition: &Partition, node: &str, asset: Option<&str>) -> Vec<u8> {
+    match asset {
         Some(asset) => asset_key(asset, partition),
-        None => task_key(graph, partition, node.name()),
+        None => task_key(graph, partition, node),
     }
 }
 
@@ -232,26 +244,145 @@ pub struct RequestRecord {
     pub outcome: RequestOutcome,
 }
 
-macro_rules! json_record {
-    ($t:ty) => {
-        impl $t {
-            /// The JSON form of the record.
-            pub fn to_bytes(&self) -> Vec<u8> {
-                serde_json::to_vec(self).expect("a record serializes to JSON")
-            }
+/// A type with a JSON byte form: the records, and the payloads of the
+/// queues and the request objects.
+pub trait JsonBytes: Serialize + DeserializeOwned {
+    /// The JSON form, with maps in key order.
+    fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self)
+            .unwrap_or_else(|e| panic!("{} serializes to JSON: {e}", type_name::<Self>()))
+    }
 
-            /// Parses the JSON form of the record.
-            pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-                serde_json::from_slice(bytes)
-            }
-        }
-    };
+    /// Parses the JSON form.
+    fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
 }
 
-json_record!(NodeRecord);
-json_record!(GraphRunRecord);
-json_record!(GraphRecord);
-json_record!(RequestRecord);
+impl JsonBytes for NodeRecord {}
+impl JsonBytes for GraphRunRecord {}
+impl JsonBytes for GraphRecord {}
+impl JsonBytes for RequestRecord {}
+
+/// The value at a key is not the record the key names.
+#[derive(Debug, thiserror::Error)]
+#[error("record `{key}` is not a record: {source}")]
+pub struct RecordError {
+    /// The key.
+    pub key: String,
+    /// The parser's error.
+    #[source]
+    pub source: serde_json::Error,
+}
+
+/// Parses the value `bytes` at `key` as a `T`.
+pub fn parse<T: JsonBytes>(key: &[u8], bytes: &[u8]) -> Result<T, RecordError> {
+    T::from_bytes(bytes).map_err(|source| RecordError {
+        key: String::from_utf8_lossy(key).into_owned(),
+        source,
+    })
+}
+
+/// A failure of a record read.
+#[derive(Debug, thiserror::Error)]
+pub enum ReadError {
+    /// The queue failed.
+    #[error(transparent)]
+    Queue(#[from] taquba::Error),
+    /// The value is not the record.
+    #[error(transparent)]
+    Record(#[from] RecordError),
+}
+
+/// A reader of the KV namespace: the queue of the process that opened the
+/// store, or a reader of another process.
+pub trait KvRead: Sync {
+    /// The value at `key`.
+    fn kv_get(&self, key: &[u8]) -> impl Future<Output = taquba::Result<Option<Bytes>>> + Send;
+
+    /// One page of the entries with `prefix`, from `cursor`.
+    fn kv_scan(
+        &self,
+        prefix: &[u8],
+        cursor: Option<&[u8]>,
+        limit: usize,
+    ) -> impl Future<Output = taquba::Result<KvPage>> + Send;
+}
+
+impl KvRead for Queue {
+    async fn kv_get(&self, key: &[u8]) -> taquba::Result<Option<Bytes>> {
+        Queue::kv_get(self, key).await
+    }
+
+    async fn kv_scan(
+        &self,
+        prefix: &[u8],
+        cursor: Option<&[u8]>,
+        limit: usize,
+    ) -> taquba::Result<KvPage> {
+        Queue::kv_scan(self, prefix, cursor, limit).await
+    }
+}
+
+impl KvRead for QueueReader {
+    async fn kv_get(&self, key: &[u8]) -> taquba::Result<Option<Bytes>> {
+        QueueReader::kv_get(self, key).await
+    }
+
+    async fn kv_scan(
+        &self,
+        prefix: &[u8],
+        cursor: Option<&[u8]>,
+        limit: usize,
+    ) -> taquba::Result<KvPage> {
+        QueueReader::kv_scan(self, prefix, cursor, limit).await
+    }
+}
+
+/// The entries of one scan page.
+const PAGE: usize = 256;
+
+/// The record at `key`, or `None` when there is no value at the key.
+pub async fn read<T: JsonBytes>(kv: &impl KvRead, key: &[u8]) -> Result<Option<T>, ReadError> {
+    match kv.kv_get(key).await? {
+        Some(bytes) => Ok(Some(parse(key, &bytes)?)),
+        None => Ok(None),
+    }
+}
+
+/// A record of a listing, with its key and the bytes it was parsed from.
+#[derive(Debug, Clone)]
+pub struct Entry<T> {
+    /// The key.
+    pub key: Vec<u8>,
+    /// The stored bytes, the expected value of a compare-and-put.
+    pub bytes: Bytes,
+    /// The record.
+    pub record: T,
+}
+
+/// Every record with `prefix`, in key order. A value that is not a `T` is
+/// logged and skipped, so one malformed record does not end a listing.
+pub async fn scan<T: JsonBytes>(
+    kv: &impl KvRead,
+    prefix: &[u8],
+) -> Result<Vec<Entry<T>>, taquba::Error> {
+    let mut records = Vec::new();
+    let mut cursor: Option<Vec<u8>> = None;
+    loop {
+        let page = kv.kv_scan(prefix, cursor.as_deref(), PAGE).await?;
+        for (key, bytes) in page.entries {
+            match parse::<T>(&key, &bytes) {
+                Ok(record) => records.push(Entry { key, bytes, record }),
+                Err(e) => tracing::warn!(error = %e, "record skipped"),
+            }
+        }
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(records),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

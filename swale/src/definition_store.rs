@@ -13,11 +13,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
 use taquba::object_store::path::Path as ObjectPath;
-use taquba::object_store::{self, ObjectStore, ObjectStoreExt};
+use taquba::object_store::{self, ObjectStore};
 
 use crate::definition;
 use crate::graph::Graph;
 use crate::operator::OperatorSet;
+use crate::store::ObjectPrefix;
 
 /// A failure of the definition store.
 #[derive(Debug, thiserror::Error)]
@@ -58,8 +59,7 @@ pub struct Published {
 
 /// The definitions of a deployment, by hash.
 pub struct DefinitionStore {
-    store: Arc<dyn ObjectStore>,
-    root: String,
+    objects: ObjectPrefix,
     operators: Arc<OperatorSet>,
     graphs: RwLock<HashMap<String, Arc<Graph>>>,
 }
@@ -72,14 +72,8 @@ impl DefinitionStore {
         store_prefix: &str,
         operators: Arc<OperatorSet>,
     ) -> Self {
-        let root = if store_prefix.is_empty() {
-            "definitions".to_string()
-        } else {
-            format!("{store_prefix}/definitions")
-        };
         DefinitionStore {
-            store,
-            root,
+            objects: ObjectPrefix::new(store, store_prefix, "definitions"),
             operators,
             graphs: RwLock::new(HashMap::new()),
         }
@@ -89,12 +83,19 @@ impl DefinitionStore {
     /// graph is unchanged.
     pub async fn put(&self, text: &str) -> Result<(String, Arc<Graph>), DefinitionError> {
         let graph = definition::load_str(text, &self.operators)?;
+        self.write(text, graph).await
+    }
+
+    /// Writes the definition object of `text`, whose checked graph is
+    /// `graph`, and caches the graph. Returns the hash and the cached graph.
+    async fn write(
+        &self,
+        text: &str,
+        graph: Graph,
+    ) -> Result<(String, Arc<Graph>), DefinitionError> {
         let hash = definition::hash(text);
-        self.store
-            .put(
-                &self.definition_path(&hash),
-                text.as_bytes().to_vec().into(),
-            )
+        self.objects
+            .put(&self.definition_path(&hash), text.as_bytes().to_vec())
             .await?;
         Ok((hash.clone(), self.cache(hash, graph)))
     }
@@ -112,26 +113,18 @@ impl DefinitionStore {
             let Some(other) = self.get(hash).await? else {
                 continue;
             };
-            let conflict = graph
-                .nodes()
-                .iter()
-                .filter_map(|n| n.asset())
-                .find(|asset| other.nodes().iter().any(|n| n.asset() == Some(asset)));
-            if let Some(asset) = conflict {
+            if let Some(node) = graph.conflicting_asset(&other) {
                 return Err(DefinitionError::AssetConflict {
-                    asset: asset.to_string(),
+                    asset: node.asset().unwrap_or_default().to_string(),
                     graph: name.clone(),
                 });
             }
         }
-        let (hash, graph) = self.put(text).await?;
+        let (hash, graph) = self.write(text, graph).await?;
         let changed = current.get(graph.name()) != Some(&hash);
         if changed {
-            self.store
-                .put(
-                    &self.pointer_path(graph.name()),
-                    hash.as_bytes().to_vec().into(),
-                )
+            self.objects
+                .put(&self.pointer_path(graph.name()), hash.as_bytes().to_vec())
                 .await?;
         }
         Ok(Published {
@@ -167,10 +160,8 @@ impl DefinitionStore {
     /// The hash of the current definition of every published graph, by graph
     /// name.
     pub async fn current(&self) -> Result<BTreeMap<String, String>, DefinitionError> {
-        let prefix = ObjectPath::from(format!("{}/current", self.root));
-        let listing = self.store.list_with_delimiter(Some(&prefix)).await?;
         let mut current = BTreeMap::new();
-        for object in listing.objects {
+        for object in self.objects.list(&self.objects.path("current")).await? {
             let Some(name) = object.location.filename() else {
                 continue;
             };
@@ -191,28 +182,27 @@ impl DefinitionStore {
     }
 
     async fn read_text(&self, path: &ObjectPath) -> Result<Option<String>, DefinitionError> {
-        let bytes = match self.store.get(path).await {
-            Ok(result) => result.bytes().await?,
-            Err(object_store::Error::NotFound { .. }) => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let Some(bytes) = self.objects.get(path).await? else {
+            return Ok(None);
         };
-        String::from_utf8(bytes.to_vec())
+        String::from_utf8(bytes)
             .map(Some)
             .map_err(|_| DefinitionError::NotText(path.to_string()))
     }
 
     fn definition_path(&self, hash: &str) -> ObjectPath {
-        ObjectPath::from(format!("{}/{hash}.toml", self.root))
+        self.objects.path(&format!("{hash}.toml"))
     }
 
     fn pointer_path(&self, graph: &str) -> ObjectPath {
-        ObjectPath::from(format!("{}/current/{graph}", self.root))
+        self.objects.path(&format!("current/{graph}"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use taquba::object_store::ObjectStoreExt;
     use taquba::object_store::memory::InMemory;
 
     fn definition(graph: &str, asset: &str, arg: &str) -> String {

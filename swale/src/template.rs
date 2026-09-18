@@ -42,7 +42,7 @@ pub enum RenderError {
 
 /// One piece of a parsed [`Template`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Segment {
+enum Segment {
     /// Text copied to the output unchanged.
     Literal(String),
     /// The partition of the task instance.
@@ -51,13 +51,9 @@ pub enum Segment {
     RunId,
     /// The summary of the graph run.
     RunSummary,
-    /// A value from the output of an upstream node.
-    Upstream {
-        /// The upstream node's name.
-        node: String,
-        /// The dotted path into the output, split at the dots.
-        path: Vec<String>,
-    },
+    /// A value from the output of an upstream node: the node's name and the
+    /// dotted path into the output, split at the dots.
+    Upstream { node: String, path: Vec<String> },
 }
 
 /// A parsed parameter string.
@@ -100,11 +96,6 @@ impl Template {
             segments.push(Segment::Literal(rest.to_string()));
         }
         Ok(Template { segments })
-    }
-
-    /// The segments in source order.
-    pub fn segments(&self) -> &[Segment] {
-        &self.segments
     }
 
     /// The names of the upstream nodes the template refers to, in source
@@ -160,18 +151,17 @@ fn reference(text: &str) -> Result<Segment, TemplateError> {
         "partition" => Ok(Segment::Partition),
         "run.id" => Ok(Segment::RunId),
         "run.summary" => Ok(Segment::RunSummary),
-        _ => match text.strip_prefix("upstream.") {
-            Some(rest) if !rest.is_empty() => {
-                let mut parts = rest.split('.');
-                let node = parts.next().unwrap_or_default().to_string();
-                let path: Vec<String> = parts.map(str::to_string).collect();
-                if node.is_empty() || path.iter().any(String::is_empty) {
-                    return Err(TemplateError::UnknownReference(text.to_string()));
-                }
-                Ok(Segment::Upstream { node, path })
+        _ => {
+            let unknown = || TemplateError::UnknownReference(text.to_string());
+            let rest = text.strip_prefix("upstream.").ok_or_else(unknown)?;
+            let mut parts = rest.split('.').map(str::to_string);
+            let node = parts.next().expect("a split yields one item");
+            let path: Vec<String> = parts.collect();
+            if node.is_empty() || path.iter().any(String::is_empty) {
+                return Err(unknown());
             }
-            _ => Err(TemplateError::UnknownReference(text.to_string())),
-        },
+            Ok(Segment::Upstream { node, path })
+        }
     }
 }
 
@@ -186,7 +176,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            template.segments(),
+            template.segments,
             [
                 Segment::Literal("a/".into()),
                 Segment::Partition,
@@ -206,7 +196,7 @@ mod tests {
     fn upstream_reference_without_a_path_is_the_whole_output() {
         let template = Template::parse("{{ upstream.extract }}").unwrap();
         assert_eq!(
-            template.segments(),
+            template.segments,
             [Segment::Upstream {
                 node: "extract".into(),
                 path: vec![],
@@ -218,7 +208,7 @@ mod tests {
     #[test]
     fn text_without_a_reference_is_one_literal() {
         let template = Template::parse("plain").unwrap();
-        assert_eq!(template.segments(), [Segment::Literal("plain".into())]);
+        assert_eq!(template.segments, [Segment::Literal("plain".into())]);
         assert_eq!(template.upstream_nodes().count(), 0);
     }
 

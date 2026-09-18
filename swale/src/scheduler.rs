@@ -43,12 +43,14 @@ use crate::hook::{EVENTS_QUEUE, Event, RecordHook};
 use crate::input::TaskInput;
 use crate::operator::OperatorSet;
 use crate::partition::Partition;
+use crate::records::JsonBytes;
 use crate::records::{
-    self, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord, RecordStatus, RequestOutcome,
-    RequestRecord,
+    self, Entry, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord, ReadError, RecordError,
+    RecordStatus, RequestOutcome, RequestRecord,
 };
 use crate::request::{Request, RequestId};
-use crate::task::TaskIdentity;
+use crate::store::store_path;
+use crate::task::{self, TaskIdentity};
 use crate::trigger::{TRIGGERS_QUEUE, Trigger, TriggerWorker};
 
 /// A failure of the scheduler.
@@ -64,13 +66,8 @@ pub enum Error {
     #[error(transparent)]
     ObjectStore(#[from] taquba::object_store::Error),
     /// A record is not valid JSON.
-    #[error("record `{key}` is not a record: {source}")]
-    Record {
-        /// The key.
-        key: String,
-        /// The parser's error.
-        source: serde_json::Error,
-    },
+    #[error(transparent)]
+    Record(#[from] RecordError),
     /// The definition store failed.
     #[error(transparent)]
     Definition(#[from] DefinitionError),
@@ -111,6 +108,38 @@ pub enum Error {
     },
 }
 
+impl From<ReadError> for Error {
+    fn from(e: ReadError) -> Self {
+        match e {
+            ReadError::Queue(e) => Error::Queue(e),
+            ReadError::Record(e) => Error::Record(e),
+        }
+    }
+}
+
+impl Error {
+    /// Whether a retry cannot change the outcome: a graph, a graph run or a
+    /// node that does not exist, a trigger without a partition, a malformed
+    /// record, or a permanent error of the queue or the runtime. A request
+    /// with such an error is refused, and a worker with it dead-letters its
+    /// job.
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            Error::Queue(e) => e.is_permanent(),
+            Error::Workflow(e) => e.is_permanent(),
+            Error::Record(_)
+            | Error::UnknownGraph(_)
+            | Error::UnknownGraphRun { .. }
+            | Error::UnknownNode { .. }
+            | Error::NoPartition(_) => true,
+            Error::ObjectStore(_)
+            | Error::Definition(_)
+            | Error::UnknownDefinition(_)
+            | Error::UnknownPool { .. } => false,
+        }
+    }
+}
+
 /// The runtime of a pool.
 pub type PoolRuntime = WorkflowRuntime<Dispatch, RecordHook>;
 
@@ -126,6 +155,7 @@ pub struct PoolsBuilder {
     dispatch: Dispatch,
     hook: RecordHook,
     poll_interval: Duration,
+    memo_retention: Duration,
     store_prefix: String,
     pools: Vec<(String, usize)>,
 }
@@ -142,6 +172,14 @@ impl PoolsBuilder {
     /// The poll interval of every pool's step worker.
     pub fn poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
+        self
+    }
+
+    /// The time the memos and the run result record of a terminated task
+    /// instance are kept, seven days by default. The scheduler does not read
+    /// them, so the window serves diagnosis alone.
+    pub fn memo_retention(mut self, retention: Duration) -> Self {
+        self.memo_retention = retention;
         self
     }
 
@@ -165,13 +203,13 @@ impl PoolsBuilder {
                     self.hook.clone(),
                 )
                 .queue_name(format!("swale-pool-{name}"))
-                .memo_prefix(if self.store_prefix.is_empty() {
-                    format!("swale-memo-{name}")
-                } else {
-                    format!("{}/swale-memo-{name}", self.store_prefix)
-                })
+                .memo_prefix(store_path(
+                    &self.store_prefix,
+                    &format!("swale-memo-{name}"),
+                ))
                 .max_concurrent_steps(concurrency)
                 .poll_interval(self.poll_interval)
+                .memo_retention(self.memo_retention)
                 .build();
                 (name, runtime)
             })
@@ -195,6 +233,7 @@ impl Pools {
             dispatch: Dispatch::new(operators),
             hook,
             poll_interval: Duration::from_millis(250),
+            memo_retention: Duration::from_secs(7 * 86_400),
             store_prefix: String::new(),
             pools: Vec::new(),
         }
@@ -203,11 +242,6 @@ impl Pools {
     /// The runtime of the pool `name`.
     pub fn runtime(&self, name: &str) -> Option<&PoolRuntime> {
         self.runtimes.get(name)
-    }
-
-    /// The pool names in arbitrary order.
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.runtimes.keys().map(String::as_str)
     }
 
     /// Spawns the step worker of every pool. Each stops when `shutdown` is
@@ -271,8 +305,6 @@ pub struct Scheduler {
     definitions: Arc<DefinitionStore>,
     pools: Arc<Pools>,
     clock: Arc<dyn Clock>,
-    events_queue: String,
-    triggers_queue: String,
 }
 
 impl Scheduler {
@@ -286,14 +318,18 @@ impl Scheduler {
             definitions,
             pools,
             clock,
-            events_queue: EVENTS_QUEUE.to_string(),
-            triggers_queue: TRIGGERS_QUEUE.to_string(),
         }
     }
 
     /// The definition store.
     pub fn definitions(&self) -> &Arc<DefinitionStore> {
         &self.definitions
+    }
+
+    /// The graph record of `graph`, or `None` when the process did not adopt
+    /// a definition of the graph.
+    pub async fn graph_record(&self, graph: &str) -> Result<Option<GraphRecord>, Error> {
+        Ok(records::read(&*self.queue, &records::graph_key(graph)).await?)
     }
 
     /// Starts the graph run of the definition `hash` for `partition`: writes
@@ -444,20 +480,18 @@ impl Scheduler {
                 partition,
                 node,
             } => {
+                let rerun_record = |run_id: &RunId| {
+                    record(RequestOutcome::Rerun {
+                        run_id: run_id.to_string(),
+                    })
+                };
                 let submitted = self
                     .rerun_with(graph, partition, node, |run_id| {
-                        let written = record(RequestOutcome::Rerun {
-                            run_id: run_id.to_string(),
-                        });
-                        HashMap::from([(key.clone(), written.to_bytes())])
+                        HashMap::from([(key.clone(), rerun_record(run_id).to_bytes())])
                     })
                     .await;
                 match submitted {
-                    Ok(Ok((run_id, true))) => {
-                        return Ok(record(RequestOutcome::Rerun {
-                            run_id: run_id.to_string(),
-                        }));
-                    }
+                    Ok(Ok((run_id, true))) => return Ok(rerun_record(&run_id)),
                     Ok(Ok((run_id, false))) => RequestOutcome::Refused {
                         reason: format!("the rerun `{run_id}` is active"),
                     },
@@ -523,14 +557,10 @@ impl Scheduler {
         trigger: &Trigger,
         interval_start_ms: Option<u64>,
     ) -> Result<Vec<Partition>, Error> {
-        let key = records::graph_key(&trigger.graph);
-        let Some(bytes) = self.queue.kv_get(&key).await? else {
-            return Err(Error::UnknownGraph(trigger.graph.clone()));
-        };
-        let record = GraphRecord::from_bytes(&bytes).map_err(|source| Error::Record {
-            key: String::from_utf8_lossy(&key).into_owned(),
-            source,
-        })?;
+        let record = self
+            .graph_record(&trigger.graph)
+            .await?
+            .ok_or_else(|| Error::UnknownGraph(trigger.graph.clone()))?;
         let partitions = if trigger.partitions.is_empty() {
             let graph = self.graph(&record.definition).await?;
             let partition = interval_start_ms
@@ -582,61 +612,50 @@ impl Scheduler {
     /// One reconciler pass over every graph run record.
     pub async fn reconcile(&self) -> Result<ReconcileReport, Error> {
         let mut report = ReconcileReport::default();
-        let mut cursor: Option<Vec<u8>> = None;
-        loop {
-            let page = self
-                .queue
-                .kv_scan(
-                    records::GRAPH_RUNS_PREFIX.as_bytes(),
-                    cursor.as_deref(),
-                    256,
-                )
-                .await?;
-            for (key, bytes) in &page.entries {
-                let Some((graph_name, partition)) = records::parse_graph_run_key(key) else {
+        let runs: Vec<Entry<GraphRunRecord>> =
+            records::scan(&*self.queue, records::GRAPH_RUNS_PREFIX.as_bytes()).await?;
+        for Entry {
+            key,
+            bytes,
+            record: run,
+        } in runs
+        {
+            let Some((graph_name, partition)) = records::parse_graph_run_key(&key) else {
+                continue;
+            };
+            let graph = match self.definitions.get(&run.definition).await {
+                Ok(Some(graph)) => graph,
+                Ok(None) => {
+                    tracing::warn!(graph = %graph_name, %partition, definition = %run.definition, "graph run records an unknown definition");
                     continue;
-                };
-                let run = GraphRunRecord::from_bytes(bytes).map_err(|source| Error::Record {
-                    key: String::from_utf8_lossy(key).into_owned(),
-                    source,
-                })?;
-                let graph = match self.definitions.get(&run.definition).await {
-                    Ok(Some(graph)) => graph,
-                    Ok(None) => {
-                        tracing::warn!(graph = %graph_name, %partition, definition = %run.definition, "graph run records an unknown definition");
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(graph = %graph_name, %partition, definition = %run.definition, error = %e, "the definition of a graph run does not load");
-                        continue;
-                    }
-                };
-                match run.state {
-                    GraphRunState::Active => {
-                        report.active_runs += 1;
-                        for node in graph.nodes() {
-                            if let Some((_, true)) = self
-                                .submit_if_ready(&graph, &run.definition, &partition, node)
-                                .await?
-                            {
-                                report.submitted += 1;
-                            }
-                        }
-                        if self.settle(&graph, &partition, &run, bytes).await? {
-                            report.settled += 1;
-                        }
-                    }
-                    GraphRunState::Cancelled => {
-                        report.cancelled += self.cancel_active_runs(&graph, &partition).await?;
-                    }
-                    GraphRunState::Complete | GraphRunState::Failed => {}
                 }
-            }
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => return Ok(report),
+                Err(e) => {
+                    tracing::warn!(graph = %graph_name, %partition, definition = %run.definition, error = %e, "the definition of a graph run does not load");
+                    continue;
+                }
+            };
+            match run.state {
+                GraphRunState::Active => {
+                    report.active_runs += 1;
+                    for node in graph.nodes() {
+                        if let Some((_, true)) = self
+                            .submit_if_ready(&graph, &run.definition, &partition, node)
+                            .await?
+                        {
+                            report.submitted += 1;
+                        }
+                    }
+                    if self.settle(&graph, &partition, &run, &bytes).await? {
+                        report.settled += 1;
+                    }
+                }
+                GraphRunState::Cancelled => {
+                    report.cancelled += self.cancel_active_runs(&graph, &partition).await?;
+                }
+                GraphRunState::Complete | GraphRunState::Failed => {}
             }
         }
+        Ok(report)
     }
 
     /// Runs the events worker, the triggers worker and the reconciler until
@@ -649,7 +668,7 @@ impl Scheduler {
         let stop = CancellationToken::new();
         let worker = taquba::run_worker_concurrent(
             &self.queue,
-            &self.events_queue,
+            EVENTS_QUEUE,
             self.clone(),
             options.concurrency,
             options.poll_interval,
@@ -657,7 +676,7 @@ impl Scheduler {
         );
         let triggers = taquba::run_worker_concurrent(
             &self.queue,
-            &self.triggers_queue,
+            TRIGGERS_QUEUE,
             Arc::new(TriggerWorker::new(self.clone())),
             options.concurrency,
             options.poll_interval,
@@ -715,10 +734,7 @@ impl Scheduler {
         let Some(bytes) = self.queue.kv_get(key).await? else {
             return Ok(None);
         };
-        let record = GraphRunRecord::from_bytes(&bytes).map_err(|source| Error::Record {
-            key: String::from_utf8_lossy(key).into_owned(),
-            source,
-        })?;
+        let record = records::parse::<GraphRunRecord>(key, &bytes)?;
         Ok(Some((record, bytes.to_vec())))
     }
 
@@ -729,15 +745,7 @@ impl Scheduler {
         node: &Node,
     ) -> Result<Option<NodeRecord>, Error> {
         let key = records::node_record_key(graph.name(), partition, node);
-        let Some(bytes) = self.queue.kv_get(&key).await? else {
-            return Ok(None);
-        };
-        NodeRecord::from_bytes(&bytes)
-            .map(Some)
-            .map_err(|source| Error::Record {
-                key: String::from_utf8_lossy(&key).into_owned(),
-                source,
-            })
+        Ok(records::read(&*self.queue, &key).await?)
     }
 
     async fn upstream_records(
@@ -831,55 +839,30 @@ impl Scheduler {
         bytes: &[u8],
     ) -> Result<bool, Error> {
         let mut all_succeeded = true;
-        let mut any_failed = false;
         for node in graph.nodes() {
+            let run_id = |rerun| task::run_id(graph.name(), partition, node.name(), rerun);
             match self.node_record(graph, partition, node).await? {
                 Some(record) if record.status == RecordStatus::Succeeded => {}
                 Some(record) => {
                     all_succeeded = false;
-                    any_failed = true;
-                    if self
-                        .run_is_active(
-                            node,
-                            &TaskIdentity {
-                                graph: graph.name().to_string(),
-                                partition: partition.clone(),
-                                node: node.name().to_string(),
-                                asset: None,
-                                definition: String::new(),
-                                rerun: record.rerun + 1,
-                            },
-                        )
-                        .await?
-                    {
+                    if self.run_is_active(node, &run_id(record.rerun + 1)).await? {
                         return Ok(false);
                     }
                 }
                 None => {
                     all_succeeded = false;
                     let upstreams = self.upstream_records(graph, partition, node).await?;
-                    let identity = TaskIdentity {
-                        graph: graph.name().to_string(),
-                        partition: partition.clone(),
-                        node: node.name().to_string(),
-                        asset: None,
-                        definition: String::new(),
-                        rerun: 0,
-                    };
-                    if is_ready(node, &upstreams) || self.run_is_active(node, &identity).await? {
+                    if is_ready(node, &upstreams) || self.run_is_active(node, &run_id(0)).await? {
                         return Ok(false);
                     }
                 }
             }
         }
+        // Without a succeeded record everywhere, no node is ready or active,
+        // so a node without a record waits for a failed or cancelled one.
         let state = if all_succeeded {
             GraphRunState::Complete
-        } else if any_failed {
-            GraphRunState::Failed
         } else {
-            // No node is ready or active. A node without a record waits for
-            // an upstream without a record (a cycle), and the graph checks
-            // exclude a cycle.
             GraphRunState::Failed
         };
         let settled = GraphRunRecord {
@@ -897,12 +880,12 @@ impl Scheduler {
         Ok(written)
     }
 
-    async fn run_is_active(&self, node: &Node, identity: &TaskIdentity) -> Result<bool, Error> {
+    async fn run_is_active(&self, node: &Node, run_id: &RunId) -> Result<bool, Error> {
         let Some(runtime) = self.pools.runtime(node.pool()) else {
             return Ok(false);
         };
         Ok(matches!(
-            runtime.status(&identity.run_id()).await?,
+            runtime.status(run_id).await?,
             Some(status) if !matches!(status.state, RunState::Terminated(_))
         ))
     }
@@ -925,15 +908,8 @@ impl Scheduler {
             let Some(runtime) = self.pools.runtime(node.pool()) else {
                 continue;
             };
-            let identity = TaskIdentity {
-                graph: graph.name().to_string(),
-                partition: partition.clone(),
-                node: node.name().to_string(),
-                asset: None,
-                definition: String::new(),
-                rerun,
-            };
-            if runtime.cancel(&identity.run_id()).await? {
+            let run_id = task::run_id(graph.name(), partition, node.name(), rerun);
+            if runtime.cancel(&run_id).await? {
                 cancelled += 1;
             }
         }
@@ -983,12 +959,20 @@ impl std::fmt::Display for NotRerun {
 /// The reason a request is refused for `error`, or the error when it is a
 /// failure of the store, which the caller retries.
 fn refusal(error: Error) -> Result<String, Error> {
-    match error {
-        Error::UnknownGraph(_)
-        | Error::UnknownGraphRun { .. }
-        | Error::UnknownNode { .. }
-        | Error::NoPartition(_) => Ok(error.to_string()),
-        e => Err(e),
+    if error.is_permanent() {
+        Ok(error.to_string())
+    } else {
+        Err(error)
+    }
+}
+
+/// The failure of a worker for `error`: permanent when the error is, and
+/// retried otherwise.
+pub(crate) fn worker_error(error: Error) -> WorkerError {
+    if error.is_permanent() {
+        PermanentFailure::new(error.to_string()).into()
+    } else {
+        Box::new(error)
     }
 }
 
@@ -1012,9 +996,7 @@ impl Worker for Scheduler {
     async fn process(&self, job: &JobRecord, _lease: &LeaseHandle) -> Result<(), WorkerError> {
         let event = Event::from_bytes(&job.payload)
             .map_err(|e| PermanentFailure::new(format!("the payload is not an event: {e}")))?;
-        self.handle_event(&event)
-            .await
-            .map_err(|e| Box::new(e) as WorkerError)
+        self.handle_event(&event).await.map_err(worker_error)
     }
 }
 

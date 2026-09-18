@@ -13,7 +13,8 @@ use taquba::{JobRecord, LeaseHandle, PermanentFailure, Worker, WorkerError};
 use taquba_cron::PREVIOUS_FIRE_MS_HEADER;
 
 use crate::partition::Partition;
-use crate::scheduler::{Error, Scheduler};
+use crate::records::JsonBytes;
+use crate::scheduler::{Scheduler, worker_error};
 
 /// The queue of the triggers.
 pub const TRIGGERS_QUEUE: &str = "swale-triggers";
@@ -28,6 +29,8 @@ pub struct Trigger {
     pub partitions: Vec<Partition>,
 }
 
+impl JsonBytes for Trigger {}
+
 impl Trigger {
     /// The trigger of a cron firing of `graph`.
     pub fn firing(graph: impl Into<String>) -> Self {
@@ -35,16 +38,6 @@ impl Trigger {
             graph: graph.into(),
             partitions: Vec::new(),
         }
-    }
-
-    /// The JSON form of the trigger.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("a trigger serializes to JSON")
-    }
-
-    /// Parses the JSON form of the trigger.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
     }
 }
 
@@ -68,17 +61,11 @@ impl Worker for TriggerWorker {
             .headers
             .get(PREVIOUS_FIRE_MS_HEADER)
             .and_then(|value| value.parse().ok());
-        match self
-            .scheduler
+        self.scheduler
             .handle_trigger(&trigger, interval_start_ms)
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(e @ (Error::UnknownGraph(_) | Error::NoPartition(_))) => {
-                Err(PermanentFailure::new(e.to_string()).into())
-            }
-            Err(e) => Err(Box::new(e) as WorkerError),
-        }
+            .map(|_| ())
+            .map_err(worker_error)
     }
 }
 

@@ -9,7 +9,7 @@ use taquba::{Clock, EnqueueOptions, EnqueueRequest, MAX_KV_VALUE_SIZE};
 use taquba_workflow::{RunOutcome, StepError, TerminalEffects, TerminalHook, TerminalStatus};
 
 use crate::partition::Partition;
-use crate::records::{NodeRecord, RecordStatus};
+use crate::records::{JsonBytes, NodeRecord, RecordStatus};
 use crate::task::TaskIdentity;
 
 /// The queue of the scheduler's events.
@@ -28,33 +28,19 @@ pub struct Event {
     pub status: RecordStatus,
 }
 
-impl Event {
-    /// The JSON form of the event.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("an event serializes to JSON")
-    }
-
-    /// Parses the JSON form of the event.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
-    }
-}
+impl JsonBytes for Event {}
 
 /// The terminal hook.
 #[derive(Clone)]
 pub struct RecordHook {
     clock: Arc<dyn Clock>,
-    events_queue: String,
 }
 
 impl RecordHook {
     /// A hook that dates records with `clock` and enqueues events on
-    /// `events_queue`.
-    pub fn new(clock: Arc<dyn Clock>, events_queue: impl Into<String>) -> Self {
-        RecordHook {
-            clock,
-            events_queue: events_queue.into(),
-        }
+    /// [`EVENTS_QUEUE`].
+    pub fn new(clock: Arc<dyn Clock>) -> Self {
+        RecordHook { clock }
     }
 
     /// The record for `outcome`. The output is included when the record stays
@@ -108,7 +94,7 @@ impl TerminalHook for RecordHook {
         };
         effects
             .enqueue(EnqueueRequest {
-                queue: self.events_queue.clone(),
+                queue: EVENTS_QUEUE.to_string(),
                 payload: event.to_bytes(),
                 options: EnqueueOptions::default().dedup_key(format!("evt:{}", outcome.run_id)),
             })
@@ -136,7 +122,7 @@ mod tests {
     }
 
     fn hook() -> RecordHook {
-        RecordHook::new(Arc::new(MockClock::new(42)), EVENTS_QUEUE)
+        RecordHook::new(Arc::new(MockClock::new(42)))
     }
 
     fn outcome(status: TerminalStatus, result: Option<&[u8]>, error: Option<&str>) -> RunOutcome {

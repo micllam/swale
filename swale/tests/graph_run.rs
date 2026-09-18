@@ -4,17 +4,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use swale::JsonBytes;
 use swale::records::{GraphRunRecord, GraphRunState, NodeRecord, RecordStatus, graph_run_key};
 use swale::scheduler::ReconcileReport;
 use swale::{
-    DefinitionStore, EVENTS_QUEUE, OperatorSet, Partition, Pools, RecordHook, Scheduler,
-    SchedulerOptions,
+    DefinitionStore, OperatorSet, Partition, Pools, RecordHook, Scheduler, SchedulerOptions,
 };
-use taquba::object_store::ObjectStore;
-use taquba::object_store::memory::InMemory;
-use taquba::{MockClock, OpenOptions, Queue, QueueConfig};
+use taquba::{MockClock, Queue};
 use taquba_workflow::RunState;
 use tokio_util::sync::CancellationToken;
+
+mod common;
 
 const PARTITION: &str = "20260915";
 
@@ -78,21 +78,11 @@ struct Harness {
 impl Harness {
     async fn start(text: &str, spawn_workers: bool) -> Harness {
         let clock = MockClock::new(1_700_000_000_000);
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let opts = OpenOptions::default()
-            .clock(Arc::new(clock.clone()))
-            .default_queue_config(QueueConfig::default().retry_backoff_base(Duration::ZERO))
-            .reaper_interval(Duration::from_millis(10))
-            .scheduler_interval(Duration::from_millis(10));
-        let queue = Arc::new(
-            Queue::open_with_options(store.clone(), "test", opts)
-                .await
-                .unwrap(),
-        );
+        let (store, queue) = common::open_queue(clock.clone()).await;
         let operators = Arc::new(OperatorSet::builtin());
         let definitions = Arc::new(DefinitionStore::new(store.clone(), "", operators.clone()));
         let (hash, _) = definitions.put(text).await.unwrap();
-        let hook = RecordHook::new(queue.clock(), EVENTS_QUEUE);
+        let hook = RecordHook::new(queue.clock());
         let pools = Arc::new(
             Pools::builder(queue.clone(), store, operators, hook)
                 .poll_interval(Duration::from_millis(10))
@@ -144,19 +134,10 @@ impl Harness {
     }
 
     async fn wait_for_state(&self, state: GraphRunState) -> GraphRunRecord {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            if let Some(run) = self.graph_run().await
-                && run.state == state
-            {
-                return run;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "graph run never reached {state:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        common::wait_until(&format!("graph run never reached {state:?}"), async || {
+            self.graph_run().await.filter(|run| run.state == state)
+        })
+        .await
     }
 
     async fn write_record(

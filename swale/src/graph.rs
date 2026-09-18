@@ -325,22 +325,22 @@ impl Graph {
                     });
                 }
             }
-        }
-        if spec.schedule.is_some() && spec.partitioning == Partitioning::Unpartitioned {
-            problems.push(Problem::ScheduleWithoutPartition);
+            if spec.partitioning == Partitioning::Unpartitioned {
+                problems.push(Problem::ScheduleWithoutPartition);
+            }
         }
         if spec.nodes.is_empty() {
             problems.push(Problem::NoNodes);
         }
 
-        let mut names = BTreeSet::new();
-        for node in &spec.nodes {
+        let mut index: BTreeMap<&str, usize> = BTreeMap::new();
+        for (i, node) in spec.nodes.iter().enumerate() {
             if !is_name(&node.name) {
                 problems.push(Problem::InvalidNodeName(node.name.clone()));
             } else if spec.name.len() + node.name.len() > MAX_GRAPH_AND_NODE_NAME_LEN {
                 problems.push(Problem::NamesTooLong(node.name.clone()));
             }
-            if !names.insert(node.name.as_str()) {
+            if index.insert(node.name.as_str(), i).is_some() {
                 problems.push(Problem::DuplicateNode(node.name.clone()));
             }
         }
@@ -385,7 +385,7 @@ impl Graph {
                 }
                 NodeKind::Task { after, .. } => {
                     for name in after {
-                        if names.contains(name.as_str()) {
+                        if index.contains_key(name.as_str()) {
                             set.insert(name.clone());
                         } else {
                             problems.push(Problem::UnknownNode {
@@ -414,22 +414,22 @@ impl Graph {
                     })
                 }
             }
-            check_templates(
-                &node.name,
-                "",
-                &toml::Value::Table(node.params.clone()),
-                upstream,
-                &mut problems,
-            );
+            for (key, item) in &node.params {
+                check_templates(&node.name, key, item, upstream, &mut problems);
+            }
         }
 
         if !problems.is_empty() {
             return Err(problems);
         }
 
-        if let Some(cycle) = find_cycle(&spec.nodes, &upstreams) {
+        if let Some(cycle) = find_cycle(&spec.nodes, &upstreams, &index) {
             return Err(vec![Problem::Cycle(cycle)]);
         }
+        let index: BTreeMap<String, usize> = index
+            .into_iter()
+            .map(|(name, i)| (name.to_string(), i))
+            .collect();
 
         let mut downstreams: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
         for (node, upstream) in spec.nodes.iter().zip(&upstreams) {
@@ -442,12 +442,10 @@ impl Graph {
         }
 
         let mut nodes = Vec::with_capacity(spec.nodes.len());
-        let mut index = BTreeMap::new();
         for (i, node_spec) in spec.nodes.into_iter().enumerate() {
             let downstream = downstreams
                 .remove(node_spec.name.as_str())
                 .unwrap_or_default();
-            index.insert(node_spec.name.clone(), i);
             nodes.push(Node {
                 upstreams: upstreams[i].iter().cloned().collect(),
                 downstreams: downstream.into_iter().collect(),
@@ -511,6 +509,14 @@ impl Graph {
     pub fn edge_count(&self) -> usize {
         self.nodes.iter().map(|n| n.upstreams.len()).sum()
     }
+
+    /// The first node of this graph, in the order of [`Graph::nodes`], whose
+    /// asset a node of `other` produces as well.
+    pub fn conflicting_asset<'a>(&'a self, other: &Graph) -> Option<&'a Node> {
+        self.nodes.iter().find(|node| {
+            node.asset().is_some() && other.nodes.iter().any(|n| n.asset() == node.asset())
+        })
+    }
 }
 
 /// Whether `text` matches `[a-z0-9_]+`.
@@ -571,7 +577,11 @@ fn check_templates(
 
 /// The path of a cycle as node names, each an upstream of the one before it
 /// and the first repeated at the end, or `None` when the edges are acyclic.
-fn find_cycle(nodes: &[NodeSpec], upstreams: &[BTreeSet<String>]) -> Option<Vec<String>> {
+fn find_cycle(
+    nodes: &[NodeSpec],
+    upstreams: &[BTreeSet<String>],
+    index: &BTreeMap<&str, usize>,
+) -> Option<Vec<String>> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Mark {
         Unvisited,
@@ -617,16 +627,11 @@ fn find_cycle(nodes: &[NodeSpec], upstreams: &[BTreeSet<String>]) -> Option<Vec<
         None
     }
 
-    let index: BTreeMap<&str, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.name.as_str(), i))
-        .collect();
     let mut marks = vec![Mark::Unvisited; nodes.len()];
     let mut path = Vec::new();
     for i in 0..nodes.len() {
         if marks[i] == Mark::Unvisited
-            && let Some(cycle) = visit(i, nodes, upstreams, &index, &mut marks, &mut path)
+            && let Some(cycle) = visit(i, nodes, upstreams, index, &mut marks, &mut path)
         {
             return Some(cycle);
         }

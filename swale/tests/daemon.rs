@@ -5,22 +5,24 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use swale::JsonBytes;
 use swale::records::{
     GraphRunRecord, GraphRunState, NodeRecord, RecordStatus, RequestOutcome, graph_key,
     graph_run_key, request_key,
 };
 use swale::scheduler::Error;
 use swale::{
-    Daemon, DaemonOptions, DefinitionStore, EVENTS_QUEUE, GraphRecord, OperatorSet, Partition,
-    Pools, RecordHook, Request, RequestId, RequestStore, Scheduler, SchedulerOptions, StatusReader,
-    TRIGGERS_QUEUE, Trigger,
+    Daemon, DaemonOptions, DefinitionStore, GraphRecord, OperatorSet, Partition, Pools, RecordHook,
+    Request, RequestId, RequestStore, Scheduler, SchedulerOptions, StatusReader, TRIGGERS_QUEUE,
+    Trigger,
 };
-use taquba::object_store::memory::InMemory;
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{ObjectStore, ObjectStoreExt};
-use taquba::{MockClock, OpenOptions, Queue, QueueConfig};
+use taquba::{MockClock, Queue};
 use taquba_cron::{Backfill, BackfillStart, Schedule};
 use tokio_util::sync::CancellationToken;
+
+mod common;
 
 /// A scheduled graph of one subprocess node in `pool`, which produces
 /// `asset`, with a catch-up window of three days.
@@ -70,17 +72,7 @@ struct Harness {
 impl Harness {
     async fn start(now: &str) -> Harness {
         let clock = MockClock::new(ms(now));
-        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let opts = OpenOptions::default()
-            .clock(Arc::new(clock.clone()))
-            .default_queue_config(QueueConfig::default().retry_backoff_base(Duration::ZERO))
-            .reaper_interval(Duration::from_millis(10))
-            .scheduler_interval(Duration::from_millis(10));
-        let queue = Arc::new(
-            Queue::open_with_options(objects.clone(), "test", opts)
-                .await
-                .unwrap(),
-        );
+        let (objects, queue) = common::open_queue(clock.clone()).await;
         let operators = Arc::new(OperatorSet::builtin());
         let definitions = Arc::new(DefinitionStore::new(objects.clone(), "", operators.clone()));
         Harness {
@@ -98,7 +90,7 @@ impl Harness {
 
     /// A daemon with the `default` pool, as a process start builds it.
     fn daemon(&self) -> (Arc<Daemon>, Arc<Scheduler>, Arc<Pools>) {
-        let hook = RecordHook::new(self.queue.clock(), EVENTS_QUEUE);
+        let hook = RecordHook::new(self.queue.clock());
         let pools = Arc::new(
             Pools::builder(
                 self.queue.clone(),
@@ -155,19 +147,15 @@ impl Harness {
     }
 
     async fn wait_for_complete(&self, partition: &str) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            if let Some(run) = self.graph_run(partition).await
-                && run.state == GraphRunState::Complete
-            {
-                return;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the graph run of {partition} never completed"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        common::wait_until(
+            &format!("the graph run of {partition} never completed"),
+            async || {
+                self.graph_run(partition)
+                    .await
+                    .filter(|run| run.state == GraphRunState::Complete)
+            },
+        )
+        .await;
     }
 
     async fn graph_record(&self, graph: &str) -> Option<GraphRecord> {
@@ -181,20 +169,14 @@ impl Harness {
     /// The record of `extract` for `partition` once its status is `status`.
     async fn wait_for_extract(&self, partition: &str, status: RecordStatus) -> NodeRecord {
         let key = format!("swale/assets/orders_raw/{partition}");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            if let Some(bytes) = self.queue.kv_get(key.as_bytes()).await.unwrap() {
-                let record = NodeRecord::from_bytes(&bytes).unwrap();
-                if record.status == status {
-                    return record;
-                }
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "extract of {partition} never reached {status}"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        common::wait_until(
+            &format!("extract of {partition} never reached {status}"),
+            async || {
+                let bytes = self.queue.kv_get(key.as_bytes()).await.unwrap()?;
+                Some(NodeRecord::from_bytes(&bytes).unwrap()).filter(|r| r.status == status)
+            },
+        )
+        .await
     }
 }
 
@@ -605,20 +587,17 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
 
     // Another process reads the record through the status reader, once the
     // writer flushed it.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let reader = StatusReader::open(h.objects.clone(), "test", h.definitions.clone())
-            .await
-            .unwrap();
+    let read = common::wait_until("no reader saw the request record", async || {
+        let reader =
+            StatusReader::open(h.objects.clone(), common::QUEUE_PATH, h.definitions.clone())
+                .await
+                .unwrap();
         let record = reader.request(&id(3)).await.unwrap();
         reader.close().await.unwrap();
-        if let Some(record) = record {
-            assert_eq!(record, recorded);
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+        record
+    })
+    .await;
+    assert_eq!(read, recorded);
 
     stop.cancel();
     for handle in pool_handles {

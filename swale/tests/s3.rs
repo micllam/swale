@@ -15,6 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use swale::JsonBytes;
 use swale::records::{GRAPH_RUNS_PREFIX, GraphRunRecord, GraphRunState};
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{ObjectStore, parse_url_opts};

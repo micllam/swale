@@ -17,9 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `swale publish` command and `DefinitionStore::publish`, which write a
   definition and the pointer of its graph to the object store. The publish
   refuses an asset that the current definition of another graph produces.
-- `Partition::of_time`, which gives the partition that contains a time. The
-  partition of a firing contains the start of the schedule interval that ends
-  at the firing time.
+- `Partition::of_time`, which gives the partition that contains a time, or
+  `None` beyond the year 9999. The partition of a firing contains the start
+  of the schedule interval that ends at the firing time.
 - The `Trigger` payload, the `swale-triggers` queue and
   `Scheduler::handle_trigger`, which start the graph runs of a firing or of a
   list of partitions.
@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the `http` operator, which sends one request and outputs the status and
   the body. Both are in `OperatorSet::builtin`. The crate depends on
   `reqwest` with `rustls`, as the object store does for a cloud backend.
+- `JsonBytes`, the trait of the JSON byte form of every record and payload,
+  and `records::read` and `records::scan`, which read a record or a listing
+  through `KvRead`, implemented by `Queue` and `QueueReader`. A malformed
+  record in a listing is logged and skipped.
+- `store::store_path` and `store::ObjectPrefix`, the one join of a path with
+  the store prefix and the objects within such a path.
+- `Graph::conflicting_asset` and `Scheduler::graph_record`.
 - The `swale start`, `swale rerun` and `swale cancel` commands and the
   `Request` type, which write a request object to the store for the daemon,
   and the request record at `swale/requests/{id}`, which the daemon writes
@@ -62,9 +69,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Call `to_string` on the value for the text, which the parser normalises.
 - **Breaking:** the operators are submodules of `operator`. Import
   `Subprocess` and `SubprocessParams` from `swale::operator::subprocess`.
+- **Breaking:** `Template::segments` and `template::Segment` are private.
+  `Template::upstream_nodes` and `Template::render` are the public
+  operations.
 - **Breaking:** `scheduler::Error` has the variants `Definition`,
-  `UnknownGraph`, `NoPartition` and `ObjectStore`. Add a wildcard arm to an
-  exhaustive match.
+  `UnknownGraph`, `NoPartition` and `ObjectStore`, and its `Record` variant
+  and that of `status::Error` contain a `RecordError`. Add a wildcard arm to
+  an exhaustive match. `Error::is_permanent` states whether a retry can
+  change the outcome, and a worker dead-letters a job with a permanent error
+  at once, a malformed record included.
+- **Breaking:** `to_bytes` and `from_bytes` of every record and payload are
+  the methods of the `JsonBytes` trait. Import `swale::JsonBytes` where they
+  are called.
+- **Breaking:** `RecordHook::new` takes the clock alone, and the hook
+  enqueues on `EVENTS_QUEUE`. `Pools::names` is removed.
+- Every pool keeps the memos and the run result record of a terminated task
+  instance for `PoolsBuilder::memo_retention`, seven days by default. 0.1.0
+  kept them without a bound.
+- `swale queues <queue>` exits with status 1 for a queue the store does not
+  have, and `StatusReader::dead_jobs` returns `None` for it. 0.1.0 printed
+  an empty table.
+- `swale publish` and `swale run` print an invalid definition as one
+  `error:` line per problem, as `swale validate` does.
+- An interrupted `swale run` waits for its workers and closes the store
+  before it exits with status 130.
+- **Breaking:** an operator has one `lease` field, an `operator::Lease` with
+  `extension` and `interval`, which replaces the two fields `lease_extension`
+  and `lease_interval`.
+- The loader reports the faults of the file and the faults of the graph in
+  one `Error::Invalid`. 0.1.0 reported the faults of the file alone when it
+  had any.
+- An invalid partition key argument of a command exits with status 2 and the
+  parser's message, as an invalid argument does. 0.1.0 exited with status 1.
 
 ### Fixed
 

@@ -14,7 +14,6 @@
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,7 +21,7 @@ use taquba_workflow::StepError;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use super::{Operator, Outcome, Task, keep_lease};
+use super::{Lease, Operator, Outcome, Task, keep_lease, tail};
 
 /// Exit code for a transient failure.
 pub const EX_TEMPFAIL: i32 = 75;
@@ -47,21 +46,10 @@ fn non_empty_argv<'de, D: serde::Deserializer<'de>>(
 }
 
 /// The `subprocess` operator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Subprocess {
-    /// The time the lease is extended to at each extension.
-    pub lease_extension: Duration,
-    /// The time between lease extensions while the program runs.
-    pub lease_interval: Duration,
-}
-
-impl Default for Subprocess {
-    fn default() -> Self {
-        Subprocess {
-            lease_extension: Duration::from_secs(60),
-            lease_interval: Duration::from_secs(20),
-        }
-    }
+    /// The lease extension while the program runs.
+    pub lease: Lease,
 }
 
 #[derive(Serialize)]
@@ -91,14 +79,7 @@ impl Operator for Subprocess {
         .expect("the stdin document serializes to JSON");
         let mut command = Command::new(&params.argv[0]);
         command.args(&params.argv[1..]);
-        run_program(
-            task,
-            command,
-            Some(document),
-            self.lease_extension,
-            self.lease_interval,
-        )
-        .await
+        run_program(task, command, Some(document), self.lease).await
     }
 }
 
@@ -110,8 +91,7 @@ pub(crate) async fn run_program(
     task: &Task<'_>,
     mut command: Command,
     stdin: Option<Vec<u8>>,
-    lease_extension: Duration,
-    lease_interval: Duration,
+    lease: Lease,
 ) -> Result<Outcome, StepError> {
     let run_id = task.identity.run_id();
     let program = command
@@ -150,7 +130,7 @@ pub(crate) async fn run_program(
     let status = tokio::select! {
         status = child.wait() => status
             .map_err(|e| StepError::permanent(format!("cannot wait for `{program}`: {e}")))?,
-        e = keep_lease(task.step, lease_extension, lease_interval) => return Err(e),
+        e = keep_lease(task.step, lease) => return Err(e),
         () = task.step.cancel_token.cancelled() => {
             let _ = child.kill().await;
             return Err(StepError::transient("the run was cancelled while the program ran"));
@@ -162,11 +142,6 @@ pub(crate) async fn run_program(
     if !err.is_empty() {
         tracing::info!(run_id = %run_id, program, stderr = %String::from_utf8_lossy(&err), "program stderr");
     }
-    let tail = || {
-        let text = String::from_utf8_lossy(&err);
-        let start = text.len().saturating_sub(512);
-        text[text.floor_char_boundary(start)..].to_string()
-    };
     match status.code() {
         Some(0) => {
             let trimmed = out.trim_ascii();
@@ -181,15 +156,15 @@ pub(crate) async fn run_program(
         }
         Some(EX_TEMPFAIL) => Err(StepError::transient(format!(
             "`{program}` exited with {EX_TEMPFAIL}: {}",
-            tail()
+            tail(&err)
         ))),
         Some(code) => Err(StepError::permanent(format!(
             "`{program}` exited with {code}: {}",
-            tail()
+            tail(&err)
         ))),
         None => Err(StepError::permanent(format!(
             "`{program}` was terminated by a signal: {}",
-            tail()
+            tail(&err)
         ))),
     }
 }

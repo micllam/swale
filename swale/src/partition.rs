@@ -41,16 +41,19 @@ impl Partition {
 
     /// The partition of `partitioning` that contains the time `ms`, in
     /// milliseconds from the Unix epoch, in UTC. `None` for a time beyond the
-    /// year 9999.
+    /// year 9999, the last year with a four-digit key.
     pub fn of_time(partitioning: Partitioning, ms: u64) -> Option<Self> {
         let time = DateTime::from_timestamp_millis(i64::try_from(ms).ok()?)?;
         let (year, month, day) = (time.year(), time.month(), time.day());
+        if year > 9999 {
+            return None;
+        }
         let key = match partitioning {
             Partitioning::Daily => format!("{year:04}{month:02}{day:02}"),
             Partitioning::Hourly => format!("{year:04}{month:02}{day:02}T{:02}", time.hour()),
             Partitioning::Unpartitioned => return Some(Partition::none()),
         };
-        Partition::new(key).ok()
+        Some(Partition(key))
     }
 
     /// The key of an unpartitioned asset.
@@ -125,6 +128,15 @@ mod tests {
         );
         assert_eq!(of_time(Partitioning::Unpartitioned, 0), Partition::none());
         assert_eq!(Partition::of_time(Partitioning::Daily, u64::MAX), None);
+        // 10000-01-01T00:00:00Z.
+        assert_eq!(
+            Partition::of_time(Partitioning::Daily, 253_402_300_800_000),
+            None
+        );
+        assert_eq!(
+            of_time(Partitioning::Daily, 253_402_300_799_999).as_str(),
+            "99991231"
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use taquba_workflow::StepError;
 
-use super::{Operator, Outcome, Task, keep_lease};
+use super::{Lease, Operator, Outcome, Task, keep_lease, tail};
 use crate::duration;
 
 /// Parameters of the `http` operator: the request.
@@ -62,18 +62,15 @@ fn method<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D
 pub struct Http {
     /// The client of every request.
     pub client: Client,
-    /// The time the lease is extended to at each extension.
-    pub lease_extension: Duration,
-    /// The time between lease extensions while the request runs.
-    pub lease_interval: Duration,
+    /// The lease extension while the request runs.
+    pub lease: Lease,
 }
 
 impl Default for Http {
     fn default() -> Self {
         Http {
             client: Client::new(),
-            lease_extension: Duration::from_secs(60),
-            lease_interval: Duration::from_secs(20),
+            lease: Lease::default(),
         }
     }
 }
@@ -110,7 +107,7 @@ impl Operator for Http {
                     StepError::transient(format!("`{request}` failed: {e}"))
                 }
             })?,
-            e = keep_lease(task.step, self.lease_extension, self.lease_interval) => return Err(e),
+            e = keep_lease(task.step, self.lease) => return Err(e),
             () = task.step.cancel_token.cancelled() => {
                 return Err(StepError::transient("the run was cancelled while the request ran"));
             }
@@ -128,13 +125,7 @@ impl Operator for Http {
                 "body": body,
             })));
         }
-        let text = String::from_utf8_lossy(&body);
-        let start = text.len().saturating_sub(512);
-        let message = format!(
-            "`{request}` returned {}: {}",
-            status.as_u16(),
-            &text[text.floor_char_boundary(start)..]
-        );
+        let message = format!("`{request}` returned {}: {}", status.as_u16(), tail(&body));
         if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
             Err(StepError::transient(message))
         } else {

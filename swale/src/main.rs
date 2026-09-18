@@ -5,18 +5,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use swale::JsonBytes;
+use swale::partition::InvalidPartition;
 use swale::records::{
     GraphRunRecord, GraphRunState, NodeRecord, RequestOutcome, graph_run_key, node_record_key,
 };
+use swale::store::store_path;
 use swale::{
-    Daemon, DaemonOptions, DefinitionStore, EVENTS_QUEUE, Error, OperatorSet, Partition,
+    Daemon, DaemonOptions, DefinitionError, DefinitionStore, Error, OperatorSet, Partition,
     Partitioning, Pools, RecordHook, Request, RequestId, RequestStore, Scheduler, SchedulerOptions,
     StatusReader,
 };
 use taquba::object_store::local::LocalFileSystem;
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{ObjectStore, parse_url_opts};
-use taquba::{Queue, QueueReader, ReaderMode, ReaderOptions};
+use taquba::{Clock, Queue, QueueReader, ReaderMode, ReaderOptions, SystemClock};
 use tokio_util::sync::CancellationToken;
 
 /// The SlateDB path of the queue within the store.
@@ -46,8 +49,8 @@ enum Command {
         #[command(flatten)]
         store: StoreArg,
         /// The partition key. Required for a partitioned graph.
-        #[arg(long)]
-        partition: Option<String>,
+        #[arg(long, value_parser = parse_partition_arg)]
+        partition: Option<Partition>,
         /// Steps run at a time in each pool.
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
@@ -82,8 +85,8 @@ enum Command {
         /// The graph.
         graph: String,
         /// The partition keys.
-        #[arg(required = true)]
-        partitions: Vec<String>,
+        #[arg(required = true, value_parser = parse_partition_arg)]
+        partitions: Vec<Partition>,
         #[command(flatten)]
         request: RequestArgs,
     },
@@ -93,7 +96,8 @@ enum Command {
         /// The graph.
         graph: String,
         /// The partition key.
-        partition: String,
+        #[arg(value_parser = parse_partition_arg)]
+        partition: Partition,
         /// The node.
         node: String,
         #[command(flatten)]
@@ -104,7 +108,8 @@ enum Command {
         /// The graph.
         graph: String,
         /// The partition key.
-        partition: String,
+        #[arg(value_parser = parse_partition_arg)]
+        partition: Partition,
         #[command(flatten)]
         request: RequestArgs,
     },
@@ -116,7 +121,8 @@ enum Command {
         graph: Option<String>,
         /// The partition key of one graph run. Without it, the command
         /// lists the graph runs of the graph.
-        partition: Option<String>,
+        #[arg(value_parser = parse_partition_arg)]
+        partition: Option<Partition>,
         #[command(flatten)]
         store: StoreArg,
         /// The graph runs listed, the latest partitions of the graph.
@@ -160,7 +166,7 @@ struct StoreArg {
 #[tokio::main]
 async fn main() -> ExitCode {
     let result = match Cli::parse().command {
-        Command::Validate { file } => return validate(&file),
+        Command::Validate { file } => validate(&file),
         Command::Run {
             file,
             store,
@@ -186,43 +192,28 @@ async fn main() -> ExitCode {
             graph,
             partitions,
             request: args,
-        } => {
-            let partitions = partitions
-                .into_iter()
-                .map(Partition::new)
-                .collect::<Result<_, _>>();
-            match partitions {
-                Ok(partitions) => send_request(Request::Start { graph, partitions }, args).await,
-                Err(e) => Err(e.into()),
-            }
-        }
+        } => send_request(Request::Start { graph, partitions }, args).await,
         Command::Rerun {
             graph,
             partition,
             node,
             request: args,
-        } => match Partition::new(partition) {
-            Ok(partition) => {
-                send_request(
-                    Request::Rerun {
-                        graph,
-                        partition,
-                        node,
-                    },
-                    args,
-                )
-                .await
-            }
-            Err(e) => Err(e.into()),
-        },
+        } => {
+            send_request(
+                Request::Rerun {
+                    graph,
+                    partition,
+                    node,
+                },
+                args,
+            )
+            .await
+        }
         Command::Cancel {
             graph,
             partition,
             request: args,
-        } => match Partition::new(partition) {
-            Ok(partition) => send_request(Request::Cancel { graph, partition }, args).await,
-            Err(e) => Err(e.into()),
-        },
+        } => send_request(Request::Cancel { graph, partition }, args).await,
         Command::Status {
             graph,
             partition,
@@ -238,34 +229,41 @@ async fn main() -> ExitCode {
     match result {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {e}");
+            print_error(e.as_ref());
             ExitCode::FAILURE
         }
     }
 }
 
-fn validate(path: &Path) -> ExitCode {
-    match swale::load_path(path, &OperatorSet::builtin()) {
-        Ok(graph) => {
-            println!(
-                "{}: {} nodes, {} edges",
-                graph.name(),
-                graph.nodes().len(),
-                graph.edge_count()
-            );
-            ExitCode::SUCCESS
-        }
-        Err(Error::Invalid(problems)) => {
+/// Prints `error` on stderr: one `error:` line per problem of an invalid
+/// definition, and one line for any other error.
+fn print_error(error: &(dyn std::error::Error + 'static)) {
+    let problems = match error.downcast_ref::<Error>() {
+        Some(Error::Invalid(problems)) => Some(problems),
+        _ => match error.downcast_ref::<DefinitionError>() {
+            Some(DefinitionError::Invalid(Error::Invalid(problems))) => Some(problems),
+            _ => None,
+        },
+    };
+    match problems {
+        Some(problems) => {
             for problem in problems {
                 eprintln!("error: {problem}");
             }
-            ExitCode::FAILURE
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
+        None => eprintln!("error: {error}"),
     }
+}
+
+fn validate(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let graph = swale::load_path(path, &OperatorSet::builtin())?;
+    println!(
+        "{}: {} nodes, {} edges",
+        graph.name(),
+        graph.nodes().len(),
+        graph.edge_count()
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Checks the scheme of a `--store` URL at argument parsing. A bare path
@@ -296,6 +294,11 @@ fn parse_store_arg(raw: &str) -> Result<String, String> {
         ));
     }
     Ok(raw.to_string())
+}
+
+/// Parses a partition key argument.
+fn parse_partition_arg(raw: &str) -> Result<Partition, InvalidPartition> {
+    Partition::new(raw)
 }
 
 /// Parses a `--pool` argument of the form `name=steps`.
@@ -358,31 +361,29 @@ fn create_store(arg: StoreArg) -> Result<Store, Box<dyn std::error::Error>> {
     if !location.contains("://") {
         std::fs::create_dir_all(&location)?;
     }
-    open_store(StoreArg {
-        store: Some(location),
-    })
+    open_location(&location)
 }
 
-/// Opens the store of `--store`, or the default store: a directory, or an
-/// object store URL with the path in the URL as the store prefix.
+/// Opens the store of `--store`, or the default store.
 fn open_store(arg: StoreArg) -> Result<Store, Box<dyn std::error::Error>> {
-    let location = store_location(arg)?;
+    open_location(&store_location(arg)?)
+}
+
+/// Opens the store at `location`: a directory, or an object store URL with
+/// the path in the URL as the store prefix.
+fn open_location(location: &str) -> Result<Store, Box<dyn std::error::Error>> {
     let (objects, prefix): (Arc<dyn ObjectStore>, ObjectPath) = if location.contains("://") {
-        let url = url::Url::parse(&location)?;
+        let url = url::Url::parse(location)?;
         let (store, prefix) = parse_url_opts(&url, store_options(std::env::vars()))?;
         (Arc::from(store), prefix)
     } else {
         (
-            Arc::new(LocalFileSystem::new_with_prefix(&location)?),
+            Arc::new(LocalFileSystem::new_with_prefix(location)?),
             ObjectPath::default(),
         )
     };
     let prefix = prefix.as_ref().to_string();
-    let queue_path = if prefix.is_empty() {
-        QUEUE_PATH.to_string()
-    } else {
-        format!("{prefix}/{QUEUE_PATH}")
-    };
+    let queue_path = store_path(&prefix, QUEUE_PATH);
     Ok(Store {
         objects,
         prefix,
@@ -405,7 +406,7 @@ impl Runtime {
         pool_sizes: &BTreeMap<String, usize>,
     ) -> Result<Runtime, Box<dyn std::error::Error>> {
         let queue = Arc::new(Queue::open(store.objects.clone(), &store.queue_path).await?);
-        let hook = RecordHook::new(queue.clock(), EVENTS_QUEUE);
+        let hook = RecordHook::new(queue.clock());
         let mut pools = Pools::builder(queue.clone(), store.objects, operators, hook)
             .poll_interval(Duration::from_millis(100))
             .store_prefix(store.prefix);
@@ -434,11 +435,7 @@ impl Runtime {
 async fn publish(file: &Path, store: StoreArg) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(file)?;
     let store = create_store(store)?;
-    let definitions = DefinitionStore::new(
-        store.objects,
-        &store.prefix,
-        Arc::new(OperatorSet::builtin()),
-    );
+    let definitions = store.definitions(Arc::new(OperatorSet::builtin()));
     let published = definitions.publish(&text).await?;
     let state = if published.changed {
         "published"
@@ -466,14 +463,10 @@ async fn daemon(
 
     let store = create_store(store)?;
     let operators = Arc::new(OperatorSet::builtin());
-    let definitions = Arc::new(DefinitionStore::new(
-        store.objects.clone(),
-        &store.prefix,
-        operators.clone(),
-    ));
+    let definitions = store.definitions(operators.clone());
     let mut pool_sizes = BTreeMap::from([("default".to_string(), concurrency)]);
     pool_sizes.extend(pools);
-    let requests = RequestStore::new(store.objects.clone(), &store.prefix);
+    let requests = store.requests();
     let runtime = Runtime::open(store, operators, definitions, &pool_sizes).await?;
     let daemon = Daemon::new(
         runtime.queue.clone(),
@@ -504,13 +497,9 @@ async fn send_request(
     request: Request,
     args: RequestArgs,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map_or(0, |since| since.as_millis() as u64);
-    let id = RequestId::generate(now_ms);
+    let id = RequestId::generate(SystemClock.now_ms());
     let store = open_store(args.store)?;
-    let requests = RequestStore::new(store.objects.clone(), &store.prefix);
-    requests.submit(&id, &request).await?;
+    store.requests().submit(&id, &request).await?;
     if !args.wait {
         println!("request {id}: written, the daemon applies it at its next sync pass");
         return Ok(ExitCode::SUCCESS);
@@ -522,7 +511,7 @@ async fn send_request(
         .manifest_poll_interval(Duration::from_secs(1));
     let reader = StatusReader::new(
         QueueReader::open_with_options(store.objects.clone(), &store.queue_path, options).await?,
-        definitions(&store),
+        store.definitions(Arc::new(OperatorSet::builtin())),
     );
     let record = loop {
         if let Some(record) = reader.request(&id).await? {
@@ -562,29 +551,46 @@ async fn open_status(store: StoreArg) -> Result<StatusReader, Box<dyn std::error
     Ok(StatusReader::open(
         store.objects.clone(),
         &store.queue_path,
-        definitions(&store),
+        store.definitions(Arc::new(OperatorSet::builtin())),
     )
     .await?)
 }
 
-/// The definition store of `store` with the built-in operators.
-fn definitions(store: &Store) -> Arc<DefinitionStore> {
-    Arc::new(DefinitionStore::new(
-        store.objects.clone(),
-        &store.prefix,
-        Arc::new(OperatorSet::builtin()),
-    ))
+impl Store {
+    /// The definition store, checking definitions against `operators`.
+    fn definitions(&self, operators: Arc<OperatorSet>) -> Arc<DefinitionStore> {
+        Arc::new(DefinitionStore::new(
+            self.objects.clone(),
+            &self.prefix,
+            operators,
+        ))
+    }
+
+    /// The request store.
+    fn requests(&self) -> RequestStore {
+        RequestStore::new(self.objects.clone(), &self.prefix)
+    }
 }
 
 async fn status(
     store: StoreArg,
     graph: Option<String>,
-    partition: Option<String>,
+    partition: Option<Partition>,
     limit: usize,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let partition = partition.map(Partition::new).transpose()?;
+    with_reader(store, async |reader| {
+        print_status(reader, graph.as_deref(), partition.as_ref(), limit).await
+    })
+    .await
+}
+
+/// Opens the status reader of `store`, runs `print` on it and closes it.
+async fn with_reader(
+    store: StoreArg,
+    print: impl AsyncFnOnce(&StatusReader) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let reader = open_status(store).await?;
-    let result = print_status(&reader, graph.as_deref(), partition.as_ref(), limit).await;
+    let result = print(&reader).await;
     reader.close().await?;
     result?;
     Ok(ExitCode::SUCCESS)
@@ -680,11 +686,10 @@ async fn queues(
     queue: Option<String>,
     limit: usize,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let reader = open_status(store).await?;
-    let result = print_queues(&reader, queue.as_deref(), limit).await;
-    reader.close().await?;
-    result?;
-    Ok(ExitCode::SUCCESS)
+    with_reader(store, async |reader| {
+        print_queues(reader, queue.as_deref(), limit).await
+    })
+    .await
 }
 
 async fn print_queues(
@@ -710,7 +715,9 @@ async fn print_queues(
     };
     let header = ["JOB", "RUN", "ATTEMPTS", "ENQUEUED"];
     let mut rows = Vec::new();
-    let jobs = reader.dead_jobs(queue, limit).await?;
+    let Some(jobs) = reader.dead_jobs(queue, limit).await? else {
+        return Err(format!("queue `{queue}` does not exist").into());
+    };
     for job in &jobs {
         rows.push([
             job.id.clone(),
@@ -779,24 +786,20 @@ fn print_table<const N: usize>(header: [&str; N], rows: &[[String; N]]) {
 async fn run(
     file: &Path,
     store: StoreArg,
-    partition: Option<String>,
+    partition: Option<Partition>,
     concurrency: usize,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(file)?;
     let operators = Arc::new(OperatorSet::builtin());
     let graph = swale::load_str(&text, &operators)?;
     let partition = match partition {
-        Some(key) => Partition::new(key)?,
+        Some(partition) => partition,
         None if graph.partitioning() == Partitioning::Unpartitioned => Partition::none(),
         None => return Err("the graph is partitioned: pass --partition <key>".into()),
     };
 
     let store = create_store(store)?;
-    let definitions = Arc::new(DefinitionStore::new(
-        store.objects.clone(),
-        &store.prefix,
-        operators.clone(),
-    ));
+    let definitions = store.definitions(operators.clone());
     let (hash, graph) = definitions.put(&text).await?;
     let pool_sizes: BTreeMap<String, usize> = graph
         .nodes()
@@ -835,6 +838,11 @@ async fn run(
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("interrupted, stopping the workers");
                 stop.cancel();
+                for handle in pool_handles {
+                    let _ = handle.wait().await;
+                }
+                let _ = scheduler_handle.wait().await;
+                runtime.close().await?;
                 return Ok(ExitCode::from(130));
             }
             () = tokio::time::sleep(Duration::from_millis(200)) => {}

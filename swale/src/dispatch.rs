@@ -8,6 +8,7 @@ use taquba_workflow::{Step, StepError, StepOutcome, StepRunner};
 
 use crate::input::TaskInput;
 use crate::operator::{OperatorSet, Outcome, Task};
+use crate::records::JsonBytes;
 use crate::task::TaskIdentity;
 
 /// The step runner over an [`OperatorSet`].

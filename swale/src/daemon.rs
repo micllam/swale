@@ -42,6 +42,7 @@ use taquba_cron::{Backfill, BackfillStart, CronScheduler, Schedule, ScheduleHand
 use tokio_util::sync::CancellationToken;
 
 use crate::graph::Graph;
+use crate::records::JsonBytes;
 use crate::records::{self, GraphRecord, RequestOutcome, RequestRecord};
 use crate::request::{Request, RequestId, RequestStore};
 use crate::scheduler::{Error, Pools, Scheduler, SchedulerOptions};
@@ -126,7 +127,7 @@ impl Daemon {
         // Every adopted graph loads first, and the asset check of a new
         // definition reads all of them.
         for (name, hash) in &current {
-            let record = self.graph_record(name).await?;
+            let record = self.scheduler.graph_record(name).await?;
             if let Some(record) = &record
                 && let Some(graph) = definitions.get(&record.definition).await?
             {
@@ -261,19 +262,6 @@ impl Daemon {
         }
     }
 
-    async fn graph_record(&self, graph: &str) -> Result<Option<GraphRecord>, Error> {
-        let key = records::graph_key(graph);
-        let Some(bytes) = self.queue.kv_get(&key).await? else {
-            return Ok(None);
-        };
-        GraphRecord::from_bytes(&bytes)
-            .map(Some)
-            .map_err(|source| Error::Record {
-                key: String::from_utf8_lossy(&key).into_owned(),
-                source,
-            })
-    }
-
     /// The reason to refuse `graph` as the definition of the pointer `name`.
     fn check(
         &self,
@@ -292,15 +280,12 @@ impl Daemon {
                     node.pool()
                 ));
             }
-            let owner = adopted.iter().find(|(other, other_graph)| {
-                *other != name
-                    && node.asset().is_some()
-                    && other_graph
-                        .nodes()
-                        .iter()
-                        .any(|n| n.asset() == node.asset())
-            });
-            if let Some((other, _)) = owner {
+        }
+        for (other, other_graph) in adopted {
+            if other == name {
+                continue;
+            }
+            if let Some(node) = graph.conflicting_asset(other_graph) {
                 return Err(format!(
                     "node `{}`: asset `{}` is produced by graph `{other}`",
                     node.name(),

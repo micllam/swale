@@ -5,6 +5,17 @@ use swale::{OperatorSet, Partitioning};
 
 const EXAMPLE: &str = "examples/orders_daily.toml";
 
+/// The output of the binary run with `args`, and `--store` at `store` when
+/// given.
+fn swale(args: &[&str], store: Option<&Path>) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_swale"));
+    command.args(args);
+    if let Some(store) = store {
+        command.arg("--store").arg(store);
+    }
+    command.output().unwrap()
+}
+
 /// An empty directory under cargo's target tmp dir, left in place after the
 /// test for inspection.
 fn scratch(name: &str) -> std::path::PathBuf {
@@ -40,10 +51,7 @@ fn example_graph_loads_with_the_documented_structure() {
 
 #[test]
 fn validate_command_reports_a_valid_definition_with_status_0() {
-    let output = Command::new(env!("CARGO_BIN_EXE_swale"))
-        .args(["validate", EXAMPLE])
-        .output()
-        .unwrap();
+    let output = swale(&["validate", EXAMPLE], None);
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
@@ -68,10 +76,7 @@ operator = "sql"
 "#,
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_swale"))
-        .args(["validate", path.to_str().unwrap()])
-        .output()
-        .unwrap();
+    let output = swale(&["validate", path.to_str().unwrap()], None);
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
@@ -82,10 +87,7 @@ operator = "sql"
 
 #[test]
 fn validate_command_reports_a_missing_file_with_status_1() {
-    let output = Command::new(env!("CARGO_BIN_EXE_swale"))
-        .args(["validate", "/nonexistent/graph.toml"])
-        .output()
-        .unwrap();
+    let output = swale(&["validate", "/nonexistent/graph.toml"], None);
     assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8(output.stderr)
@@ -96,7 +98,7 @@ fn validate_command_reports_a_missing_file_with_status_1() {
 
 #[test]
 fn usage_error_has_status_2() {
-    let output = Command::new(env!("CARGO_BIN_EXE_swale")).output().unwrap();
+    let output = swale(&[], None);
     assert_eq!(output.status.code(), Some(2));
     assert!(
         String::from_utf8(output.stderr)
@@ -111,19 +113,10 @@ fn runnable() -> String {
     std::fs::read_to_string(LOCAL_EXAMPLE).unwrap()
 }
 
-fn run_command(
-    dir: &std::path::Path,
-    file: &std::path::Path,
-    extra: &[&str],
-) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_swale"))
-        .arg("run")
-        .arg(file)
-        .arg("--store")
-        .arg(dir.join("store"))
-        .args(extra)
-        .output()
-        .unwrap()
+fn run_command(dir: &Path, file: &Path, extra: &[&str]) -> std::process::Output {
+    let mut args = vec!["run", file.to_str().unwrap()];
+    args.extend(extra);
+    swale(&args, Some(&dir.join("store")))
 }
 
 #[test]
@@ -172,10 +165,7 @@ fn run_command_accepts_a_file_url_and_refuses_an_unknown_or_unbuilt_scheme() {
     let store = dir.join("store");
     std::fs::create_dir_all(&store).unwrap();
     let url = format!("file://{}", store.display());
-    let output = Command::new(env!("CARGO_BIN_EXE_swale"))
-        .args(["run", file.to_str().unwrap(), "--store", &url])
-        .output()
-        .unwrap();
+    let output = swale(&["run", file.to_str().unwrap(), "--store", &url], None);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(
         output.status.code(),
@@ -189,10 +179,7 @@ fn run_command_accepts_a_file_url_and_refuses_an_unknown_or_unbuilt_scheme() {
         ("ftp://bucket/prefix", "scheme `ftp` is not one of"),
         ("s3://bucket/prefix", "needs a build with the `aws` feature"),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_swale"))
-            .args(["run", file.to_str().unwrap(), "--store", store])
-            .output()
-            .unwrap();
+        let output = swale(&["run", file.to_str().unwrap(), "--store", store], None);
         assert_eq!(output.status.code(), Some(2), "{store}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains(message), "{store}: {stderr}");
@@ -248,13 +235,10 @@ fn run_command_requires_a_partition_for_a_partitioned_graph() {
 fn publish_command_writes_the_definition_once_and_reports_a_fault_with_status_1() {
     let dir = scratch("swale-publish");
     let publish = |file: &Path| {
-        Command::new(env!("CARGO_BIN_EXE_swale"))
-            .arg("publish")
-            .arg(file)
-            .arg("--store")
-            .arg(dir.join("store"))
-            .output()
-            .unwrap()
+        swale(
+            &["publish", file.to_str().unwrap()],
+            Some(&dir.join("store")),
+        )
     };
     let hash = swale::definition::hash(&std::fs::read_to_string(EXAMPLE).unwrap());
 
@@ -281,20 +265,16 @@ fn publish_command_writes_the_definition_once_and_reports_a_fault_with_status_1(
     std::fs::write(&bad, "[graph]\nname = \"BAD\"\n").unwrap();
     let output = publish(&bad);
     assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("graph name `BAD`")
+    // The command prints one `error:` line per problem, as `validate` does.
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr,
+        "error: graph name `BAD` is not `[a-z0-9_]+`\nerror: the graph is empty\n"
     );
 }
 
-fn read_command(dir: &std::path::Path, store: &str, args: &[&str]) -> (Option<i32>, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_swale"))
-        .args(args)
-        .arg("--store")
-        .arg(dir.join(store))
-        .output()
-        .unwrap();
+fn read_command(dir: &Path, store: &str, args: &[&str]) -> (Option<i32>, String) {
+    let output = swale(args, Some(&dir.join(store)));
     let stdout = String::from_utf8(output.stdout).unwrap();
     (output.status.code(), stdout)
 }
@@ -358,7 +338,11 @@ fn status_and_queues_commands_print_a_failed_run_and_never_create_a_store() {
     assert_eq!(code, Some(0), "{stdout}");
     assert!(stdout.contains("  local-none-first-r0  1/1  "), "{stdout}");
 
-    for args in [&["status", "absent"][..], &["status", "local", "20260915"]] {
+    for args in [
+        &["status", "absent"][..],
+        &["status", "local", "20260915"],
+        &["queues", "absent"],
+    ] {
         let (code, stdout) = read_command(&dir, "store", args);
         assert_eq!(code, Some(1), "{stdout}");
     }

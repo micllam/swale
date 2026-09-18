@@ -10,14 +10,13 @@
 //! other code is a permanent error.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use serde::Deserialize;
 use taquba_workflow::StepError;
 use tokio::process::Command;
 
 use super::subprocess::run_program;
-use super::{Operator, Outcome, Task};
+use super::{Lease, Operator, Outcome, Task};
 
 /// Parameters of the `shell` operator: a command line and its environment.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -35,18 +34,15 @@ pub struct ShellParams {
 pub struct Shell {
     /// The shell program, `sh` from the search path by default.
     pub shell: String,
-    /// The time the lease is extended to at each extension.
-    pub lease_extension: Duration,
-    /// The time between lease extensions while the command runs.
-    pub lease_interval: Duration,
+    /// The lease extension while the command runs.
+    pub lease: Lease,
 }
 
 impl Default for Shell {
     fn default() -> Self {
         Shell {
             shell: "sh".to_string(),
-            lease_extension: Duration::from_secs(60),
-            lease_interval: Duration::from_secs(20),
+            lease: Lease::default(),
         }
     }
 }
@@ -67,14 +63,7 @@ impl Operator for Shell {
             .env("SWALE_ATTEMPT", task.step.attempts.to_string())
             .env("SWALE_INPUTS", inputs)
             .envs(&params.env);
-        run_program(
-            task,
-            command,
-            None,
-            self.lease_extension,
-            self.lease_interval,
-        )
-        .await
+        run_program(task, command, None, self.lease).await
     }
 }
 
