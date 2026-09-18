@@ -7,7 +7,8 @@
 //!     cargo test -p swale --features aws --test s3 -- --ignored
 //!
 //! The tests run the binary, so the daemon uses the wall clock. An assertion
-//! depends on a count of graph runs and never on a partition key.
+//! depends on a count of graph runs or on a partition outside every catch-up
+//! window, and never on a partition of the current time.
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -175,6 +176,28 @@ async fn daemon_adopts_a_published_graph_and_catches_up_on_the_url() {
             .count();
         reader.close().await.unwrap();
     }
+
+    // A request from another process is applied by the daemon, and the
+    // command reads its outcome. The partition is outside every catch-up
+    // window.
+    let output = swale(&["start", "catch_up", "20200101T00", "--wait"], &url)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert!(stdout.ends_with(": started 20200101T00\n"), "{stdout}");
+    let output = swale(&["cancel", "catch_up", "20200101T01", "--wait"], &url)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains(
+            "refused, graph `catch_up` does not have an active run for partition `20200101T01`"
+        ),
+        "{stderr}"
+    );
 
     // An interrupt stops the daemon with status 0.
     let mut daemon = daemon;

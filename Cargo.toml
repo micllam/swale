@@ -23,4 +23,5 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "process", "io-util", "signal"] }
 tokio-util = { version = "0.7", default-features = false }
 tracing = "0.1"
+ulid = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

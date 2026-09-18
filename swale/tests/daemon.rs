@@ -1,14 +1,19 @@
 //! The daemon on an in-memory store with the mock clock: adoption, the
-//! catch-up of a new graph, a cron firing and the backfill after downtime.
+//! catch-up of a new graph, a cron firing, the backfill after downtime and
+//! the requests of another process.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use swale::records::{GraphRunRecord, GraphRunState, graph_key, graph_run_key};
+use swale::records::{
+    GraphRunRecord, GraphRunState, NodeRecord, RecordStatus, RequestOutcome, graph_key,
+    graph_run_key, request_key,
+};
 use swale::scheduler::Error;
 use swale::{
     Daemon, DaemonOptions, DefinitionStore, EVENTS_QUEUE, GraphRecord, OperatorSet, Partition,
-    Pools, RecordHook, Scheduler, SchedulerOptions, TRIGGERS_QUEUE, Trigger,
+    Pools, RecordHook, Request, RequestId, RequestStore, Scheduler, SchedulerOptions, StatusReader,
+    TRIGGERS_QUEUE, Trigger,
 };
 use taquba::object_store::memory::InMemory;
 use taquba::object_store::path::Path as ObjectPath;
@@ -87,8 +92,12 @@ impl Harness {
         }
     }
 
+    fn requests(&self) -> RequestStore {
+        RequestStore::new(self.objects.clone(), "")
+    }
+
     /// A daemon with the `default` pool, as a process start builds it.
-    fn daemon(&self) -> (Arc<Daemon>, Arc<Scheduler>) {
+    fn daemon(&self) -> (Arc<Daemon>, Arc<Scheduler>, Arc<Pools>) {
         let hook = RecordHook::new(self.queue.clock(), EVENTS_QUEUE);
         let pools = Arc::new(
             Pools::builder(
@@ -106,8 +115,13 @@ impl Harness {
             self.definitions.clone(),
             pools.clone(),
         ));
-        let daemon = Arc::new(Daemon::new(self.queue.clone(), scheduler.clone(), pools));
-        (daemon, scheduler)
+        let daemon = Arc::new(Daemon::new(
+            self.queue.clone(),
+            scheduler.clone(),
+            pools.clone(),
+            self.requests(),
+        ));
+        (daemon, scheduler, pools)
     }
 
     fn spawn(
@@ -116,7 +130,7 @@ impl Harness {
         CancellationToken,
         tokio::task::JoinHandle<Result<(), Error>>,
     ) {
-        let (daemon, _) = self.daemon();
+        let (daemon, _, _) = self.daemon();
         let stop = CancellationToken::new();
         let shutdown = stop.clone().cancelled_owned();
         let options = DaemonOptions {
@@ -162,6 +176,25 @@ impl Harness {
             .await
             .unwrap()
             .map(|b| GraphRecord::from_bytes(&b).unwrap())
+    }
+
+    /// The record of `extract` for `partition` once its status is `status`.
+    async fn wait_for_extract(&self, partition: &str, status: RecordStatus) -> NodeRecord {
+        let key = format!("swale/assets/orders_raw/{partition}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(bytes) = self.queue.kv_get(key.as_bytes()).await.unwrap() {
+                let record = NodeRecord::from_bytes(&bytes).unwrap();
+                if record.status == status {
+                    return record;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "extract of {partition} never reached {status}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }
 
@@ -238,7 +271,7 @@ async fn a_new_graph_catches_up_firings_run_their_interval_start_and_downtime_is
 #[tokio::test]
 async fn a_sync_pass_adopts_a_changed_pointer_and_refuses_a_definition_that_cannot_run() {
     let h = Harness::start("2026-09-16T12:00:00Z").await;
-    let (daemon, scheduler) = h.daemon();
+    let (daemon, scheduler, _) = h.daemon();
     let schedule = |expression: &str| {
         Schedule::new(
             "orders",
@@ -357,4 +390,238 @@ async fn a_sync_pass_adopts_a_changed_pointer_and_refuses_a_definition_that_cann
         "{report:?}"
     );
     assert!(h.graph_record("other").await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_in_the_store_is_applied_once_and_its_record_is_readable() {
+    let h = Harness::start("2026-09-16T12:00:00Z").await;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("requests");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("marker");
+    // The node fails with a permanent exit code until the marker exists.
+    let definition = format!(
+        r#"
+[graph]
+name = "orders"
+partition = "daily"
+
+[[node]]
+name = "extract"
+produces = "orders_raw"
+operator = "subprocess"
+[node.params]
+argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
+"#,
+        marker.display()
+    );
+    h.definitions.publish(&definition).await.unwrap();
+    let (daemon, _, pools) = h.daemon();
+    let stop = CancellationToken::new();
+    let pool_handles = pools.spawn(&stop);
+    daemon.sync().await.unwrap();
+    let requests = h.requests();
+    let partition = |key: &str| Partition::new(key).unwrap();
+    let id = |n: u64| RequestId::new(format!("req-{n}")).unwrap();
+
+    // A start request runs the partitions without a graph run, and the pass
+    // removes the object.
+    let start = Request::Start {
+        graph: "orders".into(),
+        partitions: vec![partition("20260915"), partition("20260916")],
+    };
+    requests.submit(&id(1), &start).await.unwrap();
+    let report = daemon.apply_requests().await.unwrap();
+    assert_eq!(
+        report.applied,
+        [(
+            id(1),
+            RequestOutcome::Started {
+                partitions: vec![partition("20260915"), partition("20260916")]
+            }
+        )]
+    );
+    assert!(requests.list().await.unwrap().is_empty());
+    for key in ["20260915", "20260916"] {
+        assert_eq!(h.graph_run(key).await.unwrap().state, GraphRunState::Active);
+        h.wait_for_extract(key, RecordStatus::Failed).await;
+    }
+    requests
+        .submit(
+            &id(2),
+            &Request::Start {
+                graph: "orders".into(),
+                partitions: vec![partition("20260915"), partition("20260917")],
+            },
+        )
+        .await
+        .unwrap();
+    let report = daemon.apply_requests().await.unwrap();
+    assert_eq!(
+        report.applied[0].1,
+        RequestOutcome::Started {
+            partitions: vec![partition("20260917")]
+        }
+    );
+
+    // A rerun request submits the next count, and its record commits with
+    // the submit.
+    std::fs::write(&marker, b"").unwrap();
+    h.clock.advance(Duration::from_secs(60));
+    let rerun = Request::Rerun {
+        graph: "orders".into(),
+        partition: partition("20260915"),
+        node: "extract".into(),
+    };
+    requests.submit(&id(3), &rerun).await.unwrap();
+    let report = daemon.apply_requests().await.unwrap();
+    assert_eq!(
+        report.applied,
+        [(
+            id(3),
+            RequestOutcome::Rerun {
+                run_id: "orders-20260915-extract-r1".into()
+            }
+        )]
+    );
+    let record = h
+        .wait_for_extract("20260915", RecordStatus::Succeeded)
+        .await;
+    assert_eq!(record.rerun, 1);
+    let bytes = h.queue.kv_get(&request_key(&id(3))).await.unwrap().unwrap();
+    let recorded = swale::RequestRecord::from_bytes(&bytes).unwrap();
+    assert_eq!(recorded.request, rerun);
+    assert_eq!(recorded.handled_at_ms, ms("2026-09-16T12:01:00Z"));
+
+    // The object of an applied request, present again after a crash between
+    // the record and the removal, is removed without a second application.
+    h.clock.advance(Duration::from_secs(60));
+    requests.submit(&id(3), &rerun).await.unwrap();
+    let report = daemon.apply_requests().await.unwrap();
+    assert!(report.applied.is_empty());
+    assert!(requests.list().await.unwrap().is_empty());
+    let bytes = h.queue.kv_get(&request_key(&id(3))).await.unwrap().unwrap();
+    assert_eq!(swale::RequestRecord::from_bytes(&bytes).unwrap(), recorded);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        h.wait_for_extract("20260915", RecordStatus::Succeeded)
+            .await
+            .rerun,
+        1
+    );
+
+    // A refused request has its reason in the record. An object that is not
+    // a request is removed without a record.
+    let refused = [
+        (id(4), rerun.clone()),
+        (
+            id(5),
+            Request::Rerun {
+                graph: "orders".into(),
+                partition: partition("20260915"),
+                node: "nope".into(),
+            },
+        ),
+        (
+            id(6),
+            Request::Start {
+                graph: "nope".into(),
+                partitions: vec![partition("20260915")],
+            },
+        ),
+        (
+            id(7),
+            Request::Cancel {
+                graph: "orders".into(),
+                partition: partition("20260901"),
+            },
+        ),
+    ];
+    for (id, request) in &refused {
+        requests.submit(id, request).await.unwrap();
+    }
+    h.objects
+        .put(
+            &ObjectPath::from("requests/not-a-request"),
+            b"nope".to_vec().into(),
+        )
+        .await
+        .unwrap();
+    let report = daemon.apply_requests().await.unwrap();
+    let reasons: Vec<String> = report
+        .applied
+        .iter()
+        .map(|(_, outcome)| match outcome {
+            RequestOutcome::Refused { reason } => reason.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "node `extract` succeeded",
+            "graph `orders` does not have a node `nope`",
+            "graph `nope` does not have an adopted definition",
+            "graph `orders` does not have an active run for partition `20260901`",
+        ]
+    );
+    assert!(requests.list().await.unwrap().is_empty());
+    assert!(
+        h.queue
+            .kv_get(b"swale/requests/not-a-request")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // A cancel request in the same pass as the start of its graph run
+    // cancels the run.
+    requests
+        .submit(
+            &id(8),
+            &Request::Start {
+                graph: "orders".into(),
+                partitions: vec![partition("20260918")],
+            },
+        )
+        .await
+        .unwrap();
+    requests
+        .submit(
+            &id(9),
+            &Request::Cancel {
+                graph: "orders".into(),
+                partition: partition("20260918"),
+            },
+        )
+        .await
+        .unwrap();
+    let report = daemon.apply_requests().await.unwrap();
+    assert_eq!(report.applied[1], (id(9), RequestOutcome::Cancelled));
+    assert_eq!(
+        h.graph_run("20260918").await.unwrap().state,
+        GraphRunState::Cancelled
+    );
+
+    // Another process reads the record through the status reader, once the
+    // writer flushed it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let reader = StatusReader::open(h.objects.clone(), "test", h.definitions.clone())
+            .await
+            .unwrap();
+        let record = reader.request(&id(3)).await.unwrap();
+        reader.close().await.unwrap();
+        if let Some(record) = record {
+            assert_eq!(record, recorded);
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    stop.cancel();
+    for handle in pool_handles {
+        let _ = handle.wait().await;
+    }
 }

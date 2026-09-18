@@ -17,6 +17,12 @@
 //! to every node of every active graph run, cancels the active runs of a
 //! cancelled graph run and writes the final state. A lost event delays a
 //! graph run by one reconciler interval at most.
+//!
+//! A [`Request`] from another process ([`Scheduler::handle_request`]) starts
+//! graph runs, reruns a node or cancels a graph run, and its outcome is
+//! recorded at the request's key. The record of a rerun commits with the
+//! submit of the task instance, so a request applied a second time after a
+//! crash does not submit a second task instance.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -37,7 +43,11 @@ use crate::hook::{EVENTS_QUEUE, Event, RecordHook};
 use crate::input::TaskInput;
 use crate::operator::OperatorSet;
 use crate::partition::Partition;
-use crate::records::{self, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord, RecordStatus};
+use crate::records::{
+    self, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord, RecordStatus, RequestOutcome,
+    RequestRecord,
+};
+use crate::request::{Request, RequestId};
 use crate::task::TaskIdentity;
 use crate::trigger::{TRIGGERS_QUEUE, Trigger, TriggerWorker};
 
@@ -50,6 +60,9 @@ pub enum Error {
     /// The workflow runtime failed.
     #[error(transparent)]
     Workflow(#[from] taquba_workflow::Error),
+    /// The object store failed.
+    #[error(transparent)]
+    ObjectStore(#[from] taquba::object_store::Error),
     /// A record is not valid JSON.
     #[error("record `{key}` is not a record: {source}")]
     Record {
@@ -311,7 +324,12 @@ impl Scheduler {
         let mut submitted = Vec::new();
         for node in graph.roots() {
             let (run_id, _) = self
-                .submit_node(&graph, hash, partition, node, 0, &BTreeMap::new())
+                .submit_node(
+                    node,
+                    identity(&graph, hash, partition, node, 0),
+                    &BTreeMap::new(),
+                    |_| HashMap::new(),
+                )
                 .await?;
             submitted.push(run_id);
         }
@@ -331,6 +349,22 @@ impl Scheduler {
         partition: &Partition,
         node: &str,
     ) -> Result<Option<RunId>, Error> {
+        let submitted = self
+            .rerun_with(graph_name, partition, node, |_| HashMap::new())
+            .await?;
+        Ok(submitted.ok().map(|(run_id, _)| run_id))
+    }
+
+    /// [`Self::rerun`] with the KV writes of `kv_writes`, given the run id,
+    /// committed with the submit. Returns the run id and whether the submit
+    /// was new, or the reason the node was not rerun.
+    async fn rerun_with(
+        &self,
+        graph_name: &str,
+        partition: &Partition,
+        node: &str,
+        kv_writes: impl FnOnce(&RunId) -> HashMap<Vec<u8>, Vec<u8>>,
+    ) -> Result<Result<(RunId, bool), NotRerun>, Error> {
         let key = records::graph_run_key(graph_name, partition);
         let Some((run, bytes)) = self.graph_run(&key).await? else {
             return Err(Error::UnknownGraphRun {
@@ -344,14 +378,14 @@ impl Scheduler {
             node: node.to_string(),
         })?;
         let Some(record) = self.node_record(&graph, partition, node).await? else {
-            return Ok(None);
+            return Ok(Err(NotRerun::NoRecord));
         };
         if record.status == RecordStatus::Succeeded {
-            return Ok(None);
+            return Ok(Err(NotRerun::Succeeded));
         }
         let upstreams = self.upstream_records(&graph, partition, node).await?;
         if !is_ready(node, &upstreams) {
-            return Ok(None);
+            return Ok(Err(NotRerun::NotReady));
         }
         if run.state != GraphRunState::Active {
             let active = GraphRunRecord {
@@ -362,17 +396,94 @@ impl Scheduler {
                 .kv_compare_put(&key, Some(&bytes), &active.to_bytes())
                 .await?;
         }
-        let (run_id, _) = self
-            .submit_node(
-                &graph,
-                &record.definition,
+        let identity = identity(
+            &graph,
+            &record.definition,
+            partition,
+            node,
+            record.rerun + 1,
+        );
+        let submitted = self
+            .submit_node(node, identity, &upstreams, kv_writes)
+            .await?;
+        Ok(Ok(submitted))
+    }
+
+    /// Applies the request `id` and writes its record at the request's
+    /// key. A request that refers to an absent graph, graph run or node, or
+    /// that the state of the graph run does not admit, is refused in the
+    /// record. A failure of the store is returned, and the record is not
+    /// written.
+    pub async fn handle_request(
+        &self,
+        id: &RequestId,
+        request: &Request,
+    ) -> Result<RequestRecord, Error> {
+        let key = records::request_key(id);
+        let handled_at_ms = self.clock.now_ms();
+        let record = |outcome| RequestRecord {
+            request: request.clone(),
+            handled_at_ms,
+            outcome,
+        };
+        let outcome = match request {
+            Request::Start { graph, partitions } => {
+                let trigger = Trigger {
+                    graph: graph.clone(),
+                    partitions: partitions.clone(),
+                };
+                match self.handle_trigger(&trigger, None).await {
+                    Ok(partitions) => RequestOutcome::Started { partitions },
+                    Err(e) => RequestOutcome::Refused {
+                        reason: refusal(e)?,
+                    },
+                }
+            }
+            Request::Rerun {
+                graph,
                 partition,
                 node,
-                record.rerun + 1,
-                &upstreams,
-            )
-            .await?;
-        Ok(Some(run_id))
+            } => {
+                let submitted = self
+                    .rerun_with(graph, partition, node, |run_id| {
+                        let written = record(RequestOutcome::Rerun {
+                            run_id: run_id.to_string(),
+                        });
+                        HashMap::from([(key.clone(), written.to_bytes())])
+                    })
+                    .await;
+                match submitted {
+                    Ok(Ok((run_id, true))) => {
+                        return Ok(record(RequestOutcome::Rerun {
+                            run_id: run_id.to_string(),
+                        }));
+                    }
+                    Ok(Ok((run_id, false))) => RequestOutcome::Refused {
+                        reason: format!("the rerun `{run_id}` is active"),
+                    },
+                    Ok(Err(reason)) => RequestOutcome::Refused {
+                        reason: format!("node `{node}` {reason}"),
+                    },
+                    Err(e) => RequestOutcome::Refused {
+                        reason: refusal(e)?,
+                    },
+                }
+            }
+            Request::Cancel { graph, partition } => {
+                if self.cancel_run(graph, partition).await? {
+                    RequestOutcome::Cancelled
+                } else {
+                    RequestOutcome::Refused {
+                        reason: format!(
+                            "graph `{graph}` does not have an active run for partition `{partition}`"
+                        ),
+                    }
+                }
+            }
+        };
+        let record = record(outcome);
+        self.queue.kv_put(&key, &record.to_bytes()).await?;
+        Ok(record)
     }
 
     /// Cancels the graph run: writes the cancelled state and cancels every
@@ -664,19 +775,25 @@ impl Scheduler {
             return Ok(None);
         }
         Ok(Some(
-            self.submit_node(graph, hash, partition, node, 0, &upstreams)
-                .await?,
+            self.submit_node(
+                node,
+                identity(graph, hash, partition, node, 0),
+                &upstreams,
+                |_| HashMap::new(),
+            )
+            .await?,
         ))
     }
 
+    /// Submits the task instance `identity` of `node`, with the KV writes of
+    /// `kv_writes` committed with a new submit. Returns the run id and
+    /// whether the submit was new.
     async fn submit_node(
         &self,
-        graph: &Graph,
-        hash: &str,
-        partition: &Partition,
         node: &Node,
-        rerun: u32,
+        identity: TaskIdentity,
         upstreams: &BTreeMap<String, NodeRecord>,
+        kv_writes: impl FnOnce(&RunId) -> HashMap<Vec<u8>, Vec<u8>>,
     ) -> Result<(RunId, bool), Error> {
         let runtime = self
             .pools
@@ -685,14 +802,6 @@ impl Scheduler {
                 node: node.name().to_string(),
                 pool: node.pool().to_string(),
             })?;
-        let identity = TaskIdentity {
-            graph: graph.name().to_string(),
-            partition: partition.clone(),
-            node: node.name().to_string(),
-            asset: node.asset().map(str::to_string),
-            definition: hash.to_string(),
-            rerun,
-        };
         let run_id = identity.run_id();
         let outcome = runtime
             .submit(RunSpec {
@@ -703,7 +812,7 @@ impl Scheduler {
                     max_attempts_per_step: Some(node.retries() + 1),
                     ..RunOptions::default()
                 },
-                kv_writes: HashMap::new(),
+                kv_writes: kv_writes(&run_id),
             })
             .await?;
         if outcome.newly_submitted {
@@ -829,6 +938,57 @@ impl Scheduler {
             }
         }
         Ok(cancelled)
+    }
+}
+
+/// The identity of the task instance of `node` at the rerun count `rerun`.
+fn identity(
+    graph: &Graph,
+    hash: &str,
+    partition: &Partition,
+    node: &Node,
+    rerun: u32,
+) -> TaskIdentity {
+    TaskIdentity {
+        graph: graph.name().to_string(),
+        partition: partition.clone(),
+        node: node.name().to_string(),
+        asset: node.asset().map(str::to_string),
+        definition: hash.to_string(),
+        rerun,
+    }
+}
+
+/// Why a rerun did not submit a task instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotRerun {
+    /// The node does not have a record.
+    NoRecord,
+    /// The record of the node is succeeded.
+    Succeeded,
+    /// The records of the node's upstreams do not satisfy its trigger rule.
+    NotReady,
+}
+
+impl std::fmt::Display for NotRerun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            NotRerun::NoRecord => "does not have a record",
+            NotRerun::Succeeded => "succeeded",
+            NotRerun::NotReady => "is not ready: its upstreams do not satisfy its trigger rule",
+        })
+    }
+}
+
+/// The reason a request is refused for `error`, or the error when it is a
+/// failure of the store, which the caller retries.
+fn refusal(error: Error) -> Result<String, Error> {
+    match error {
+        Error::UnknownGraph(_)
+        | Error::UnknownGraphRun { .. }
+        | Error::UnknownNode { .. }
+        | Error::NoPartition(_) => Ok(error.to_string()),
+        e => Err(e),
     }
 }
 

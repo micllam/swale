@@ -92,7 +92,7 @@ store URL (`s3://bucket/prefix`, `gs://bucket/prefix`,
 (`aws`, `gcp` or `azure`) and reads the provider's environment variables for
 its credentials. The default store is `~/.swale/store`.
 
-`swale run` and `swale daemon` open the store as its one writer. A `swale run`
+`swale run` and `swale daemon` open the store as its only writer. A `swale run`
 on the store of a running daemon opens a second writer, and the store then
 refuses the writes of the daemon.
 
@@ -105,6 +105,13 @@ run until a rerun changes the record of an upstream.
 `swale queues` lists the job counts of every queue, and `swale queues <queue>`
 lists the dead jobs of one queue. Both commands only read from the store, so
 they can run alongside a daemon.
+
+`swale start <graph> <partition>...` starts the graph run of each partition,
+`swale rerun <graph> <partition> <node>` runs a node with a failed or
+cancelled record again, and `swale cancel <graph> <partition>` cancels an
+active graph run. Each command writes a request to the store and does not
+open the queue, and the daemon applies the request at its next sync pass.
+With `--wait` the command waits for the outcome and prints it.
 
 ```console
 $ swale validate examples/orders_daily.toml
@@ -122,14 +129,16 @@ second  default  succeeded  local-none-second-r0  2026-09-17T13:48:20Z
 $ swale publish examples/orders_daily.toml --store s3://bucket/swale
 orders_daily: published 36e831ff15e026ad45115374cb98edec6b617dffb0d4ef40f9fd351ea36bca9a
 $ swale daemon --store s3://bucket/swale --pool warehouse=2
+$ swale rerun orders_daily 20260915 transform --store s3://bucket/swale --wait
+request 01K5ARRE8ZW9K8XTJTQ6PVYJK7: submitted orders_daily-20260915-transform-r1
 ```
 
 A command exits with status 0, 1 or 2:
 
 - **0.** The command succeeded. An interrupt ends `swale daemon` with this
   status.
-- **1.** A definition has a fault, a graph run failed or another error
-  occurred.
+- **1.** A definition has a fault, a graph run failed, a request was refused
+  or another error occurred.
 - **2.** The arguments are not valid.
 
 ## License

@@ -5,15 +5,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use swale::records::{GraphRunRecord, GraphRunState, NodeRecord, graph_run_key, node_record_key};
+use swale::records::{
+    GraphRunRecord, GraphRunState, NodeRecord, RequestOutcome, graph_run_key, node_record_key,
+};
 use swale::{
     Daemon, DaemonOptions, DefinitionStore, EVENTS_QUEUE, Error, OperatorSet, Partition,
-    Partitioning, Pools, RecordHook, Scheduler, SchedulerOptions, StatusReader,
+    Partitioning, Pools, RecordHook, Request, RequestId, RequestStore, Scheduler, SchedulerOptions,
+    StatusReader,
 };
-use taquba::Queue;
 use taquba::object_store::local::LocalFileSystem;
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{ObjectStore, parse_url_opts};
+use taquba::{Queue, QueueReader, ReaderMode, ReaderOptions};
 use tokio_util::sync::CancellationToken;
 
 /// The SlateDB path of the queue within the store.
@@ -73,6 +76,38 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         sync_interval: u64,
     },
+    /// Asks the daemon on a store to start the graph run of each partition.
+    /// A partition with a graph run is unchanged.
+    Start {
+        /// The graph.
+        graph: String,
+        /// The partition keys.
+        #[arg(required = true)]
+        partitions: Vec<String>,
+        #[command(flatten)]
+        request: RequestArgs,
+    },
+    /// Asks the daemon on a store to run a node with a failed or cancelled
+    /// record again.
+    Rerun {
+        /// The graph.
+        graph: String,
+        /// The partition key.
+        partition: String,
+        /// The node.
+        node: String,
+        #[command(flatten)]
+        request: RequestArgs,
+    },
+    /// Asks the daemon on a store to cancel an active graph run.
+    Cancel {
+        /// The graph.
+        graph: String,
+        /// The partition key.
+        partition: String,
+        #[command(flatten)]
+        request: RequestArgs,
+    },
     /// Prints the graphs of a store, the graph runs of a graph, or the
     /// nodes of one graph run. The command only reads from the store, so
     /// it can run alongside a daemon.
@@ -99,6 +134,16 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+}
+
+/// The arguments of a command that writes a request.
+#[derive(clap::Args)]
+struct RequestArgs {
+    #[command(flatten)]
+    store: StoreArg,
+    /// Waits for the daemon to apply the request and prints the outcome.
+    #[arg(long)]
+    wait: bool,
 }
 
 #[derive(clap::Args)]
@@ -137,6 +182,47 @@ async fn main() -> ExitCode {
             )
             .await
         }
+        Command::Start {
+            graph,
+            partitions,
+            request: args,
+        } => {
+            let partitions = partitions
+                .into_iter()
+                .map(Partition::new)
+                .collect::<Result<_, _>>();
+            match partitions {
+                Ok(partitions) => send_request(Request::Start { graph, partitions }, args).await,
+                Err(e) => Err(e.into()),
+            }
+        }
+        Command::Rerun {
+            graph,
+            partition,
+            node,
+            request: args,
+        } => match Partition::new(partition) {
+            Ok(partition) => {
+                send_request(
+                    Request::Rerun {
+                        graph,
+                        partition,
+                        node,
+                    },
+                    args,
+                )
+                .await
+            }
+            Err(e) => Err(e.into()),
+        },
+        Command::Cancel {
+            graph,
+            partition,
+            request: args,
+        } => match Partition::new(partition) {
+            Ok(partition) => send_request(Request::Cancel { graph, partition }, args).await,
+            Err(e) => Err(e.into()),
+        },
         Command::Status {
             graph,
             partition,
@@ -387,11 +473,13 @@ async fn daemon(
     ));
     let mut pool_sizes = BTreeMap::from([("default".to_string(), concurrency)]);
     pool_sizes.extend(pools);
+    let requests = RequestStore::new(store.objects.clone(), &store.prefix);
     let runtime = Runtime::open(store, operators, definitions, &pool_sizes).await?;
     let daemon = Daemon::new(
         runtime.queue.clone(),
         runtime.scheduler.clone(),
         runtime.pools.clone(),
+        requests,
     );
     let result = daemon
         .run(
@@ -410,15 +498,82 @@ async fn daemon(
     Ok(ExitCode::SUCCESS)
 }
 
+/// Writes `request` to the store and, with `--wait`, prints its outcome
+/// once the daemon applies it.
+async fn send_request(
+    request: Request,
+    args: RequestArgs,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    let id = RequestId::generate(now_ms);
+    let store = open_store(args.store)?;
+    let requests = RequestStore::new(store.objects.clone(), &store.prefix);
+    requests.submit(&id, &request).await?;
+    if !args.wait {
+        println!("request {id}: written, the daemon applies it at its next sync pass");
+        return Ok(ExitCode::SUCCESS);
+    }
+    // The wait polls the record, so the reader refreshes its view every
+    // second.
+    let options = ReaderOptions::default()
+        .mode(ReaderMode::FollowLatest)
+        .manifest_poll_interval(Duration::from_secs(1));
+    let reader = StatusReader::new(
+        QueueReader::open_with_options(store.objects.clone(), &store.queue_path, options).await?,
+        definitions(&store),
+    );
+    let record = loop {
+        if let Some(record) = reader.request(&id).await? {
+            break record;
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("interrupted, request {id} stays in the store");
+                reader.close().await?;
+                return Ok(ExitCode::from(130));
+            }
+            () = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+    };
+    reader.close().await?;
+    match record.outcome {
+        RequestOutcome::Started { partitions } => {
+            let keys: Vec<String> = partitions.iter().map(Partition::to_string).collect();
+            if keys.is_empty() {
+                println!("request {id}: every partition has a graph run");
+            } else {
+                println!("request {id}: started {}", keys.join(", "));
+            }
+        }
+        RequestOutcome::Rerun { run_id } => println!("request {id}: submitted {run_id}"),
+        RequestOutcome::Cancelled => println!("request {id}: cancelled"),
+        RequestOutcome::Refused { reason } => {
+            return Err(format!("request {id}: refused, {reason}").into());
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// Opens the status reader of `--store` with the built-in operators.
 async fn open_status(store: StoreArg) -> Result<StatusReader, Box<dyn std::error::Error>> {
     let store = open_store(store)?;
-    let definitions = Arc::new(DefinitionStore::new(
+    Ok(StatusReader::open(
+        store.objects.clone(),
+        &store.queue_path,
+        definitions(&store),
+    )
+    .await?)
+}
+
+/// The definition store of `store` with the built-in operators.
+fn definitions(store: &Store) -> Arc<DefinitionStore> {
+    Arc::new(DefinitionStore::new(
         store.objects.clone(),
         &store.prefix,
         Arc::new(OperatorSet::builtin()),
-    ));
-    Ok(StatusReader::open(store.objects, &store.queue_path, definitions).await?)
+    ))
 }
 
 async fn status(

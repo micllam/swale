@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which read the graphs, the graph runs, the node states and the queues of a
   store through a `QueueReader`. The commands only read from the store, so
   they can run alongside a daemon.
+- The `swale start`, `swale rerun` and `swale cancel` commands and the
+  `Request` type, which write a request object to the store for the daemon,
+  and the request record at `swale/requests/{id}`, which the daemon writes
+  with the outcome and `StatusReader::request` reads. The commands do not
+  open the queue, and `--wait` prints the outcome. `Daemon::new` takes a
+  `RequestStore`, and the crate depends on `ulid` for the request id.
 
 ### Changed
 
@@ -50,7 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `Graph::schedule` returns the parsed `taquba_cron::Expression`.
   Call `to_string` on the value for the text, which the parser normalises.
 - **Breaking:** `scheduler::Error` has the variants `Definition`,
-  `UnknownGraph` and `NoPartition`. Add a wildcard arm to an exhaustive match.
+  `UnknownGraph`, `NoPartition` and `ObjectStore`. Add a wildcard arm to an
+  exhaustive match.
 
 ### Fixed
 

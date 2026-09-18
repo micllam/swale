@@ -22,8 +22,9 @@ use crate::graph::{Graph, Node, TriggerRule};
 use crate::partition::Partition;
 use crate::records::{
     self, GRAPH_RUNS_PREFIX, GRAPHS_PREFIX, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord,
-    RecordStatus,
+    RecordStatus, RequestRecord,
 };
+use crate::request::RequestId;
 use crate::scheduler::is_ready;
 
 /// The entries of one scan page.
@@ -337,6 +338,16 @@ impl StatusReader {
             record,
             nodes,
         }))
+    }
+
+    /// The record of the request `id`, or `None` while the daemon did not
+    /// apply the request.
+    pub async fn request(&self, id: &RequestId) -> Result<Option<RequestRecord>, Error> {
+        let key = records::request_key(id);
+        let Some(bytes) = self.reader.kv_get(&key).await? else {
+            return Ok(None);
+        };
+        parse(&key, &bytes, RequestRecord::from_bytes).map(Some)
     }
 
     /// The job counts of every queue of the store, by queue name.

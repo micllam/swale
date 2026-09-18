@@ -6,12 +6,14 @@
 //! - `swale/assets/{asset}/{partition}`: the [`NodeRecord`] of an asset node.
 //! - `swale/tasks/{graph}/{partition}/{node}`: the [`NodeRecord`] of a task
 //!   node.
+//! - `swale/requests/{id}`: the [`RequestRecord`] of an applied request.
 
 use serde::{Deserialize, Serialize};
 use taquba_workflow::TerminalStatus;
 
 use crate::graph::Node;
 use crate::partition::Partition;
+use crate::request::{Request, RequestId};
 
 /// The prefix of every key of this crate.
 pub const KV_PREFIX: &str = "swale/";
@@ -55,6 +57,14 @@ pub fn asset_key(asset: &str, partition: &Partition) -> Vec<u8> {
 /// The key of the task record.
 pub fn task_key(graph: &str, partition: &Partition, node: &str) -> Vec<u8> {
     format!("{KV_PREFIX}tasks/{graph}/{partition}/{node}").into_bytes()
+}
+
+/// The prefix of every request record.
+pub const REQUESTS_PREFIX: &str = "swale/requests/";
+
+/// The key of the request record.
+pub fn request_key(id: &RequestId) -> Vec<u8> {
+    format!("{REQUESTS_PREFIX}{id}").into_bytes()
 }
 
 /// The key of the record of `node` for `partition`: the asset key of an asset
@@ -176,13 +186,50 @@ pub struct GraphRunRecord {
 }
 
 /// The record of a graph the process adopted: the definition that a trigger
-/// of the graph starts. The daemon is the one writer of the record.
+/// of the graph starts. The daemon is the only writer of the record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphRecord {
     /// The hash of the adopted definition.
     pub definition: String,
     /// The time of the adoption, in milliseconds from the Unix epoch.
     pub adopted_at_ms: u64,
+}
+
+/// The outcome of a request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RequestOutcome {
+    /// The graph runs of the listed partitions were started. A partition of
+    /// the request that is absent from the list had a graph run before.
+    Started {
+        /// The partitions whose graph run the request started.
+        partitions: Vec<Partition>,
+    },
+    /// The task instance of the rerun was submitted.
+    Rerun {
+        /// The run id of the task instance.
+        run_id: String,
+    },
+    /// The graph run was cancelled.
+    Cancelled,
+    /// The request was refused.
+    Refused {
+        /// The reason.
+        reason: String,
+    },
+}
+
+/// The record of an applied request. The daemon is the only writer of the
+/// record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestRecord {
+    /// The request.
+    pub request: Request,
+    /// The time the request was applied, in milliseconds from the Unix
+    /// epoch.
+    pub handled_at_ms: u64,
+    /// The outcome.
+    pub outcome: RequestOutcome,
 }
 
 macro_rules! json_record {
@@ -204,6 +251,7 @@ macro_rules! json_record {
 json_record!(NodeRecord);
 json_record!(GraphRunRecord);
 json_record!(GraphRecord);
+json_record!(RequestRecord);
 
 #[cfg(test)]
 mod tests {
@@ -224,6 +272,10 @@ mod tests {
         assert_eq!(
             task_key("orders_daily", &partition, "notify"),
             b"swale/tasks/orders_daily/20260915/notify"
+        );
+        assert_eq!(
+            request_key(&RequestId::new("01J").unwrap()),
+            b"swale/requests/01J"
         );
         assert_eq!(
             parse_graph_key(b"swale/graphs/orders_daily"),
@@ -273,5 +325,22 @@ mod tests {
         );
         assert_eq!(RecordStatus::Failed.to_string(), "failed");
         assert_eq!(GraphRunState::Complete.to_string(), "complete");
+
+        let request = RequestRecord {
+            request: Request::Cancel {
+                graph: "g".into(),
+                partition: Partition::new("20260915").unwrap(),
+            },
+            handled_at_ms: 9,
+            outcome: RequestOutcome::Refused {
+                reason: "no".into(),
+            },
+        };
+        let json = String::from_utf8(request.to_bytes()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"request":{"kind":"cancel","graph":"g","partition":"20260915"},"handled_at_ms":9,"outcome":{"kind":"refused","reason":"no"}}"#
+        );
+        assert_eq!(RequestRecord::from_bytes(json.as_bytes()).unwrap(), request);
     }
 }

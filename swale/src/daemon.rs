@@ -22,6 +22,15 @@
 //! The daemon keeps one cron scheduler for its lifetime. Every sync pass
 //! gives the [`Schedule`] of each adopted graph to
 //! [`ScheduleHandle::replace_all`], which leaves an equal schedule untouched.
+//!
+//! # Requests
+//!
+//! After the sync pass, a request pass ([`Daemon::apply_requests`]) reads
+//! the request objects of the [`RequestStore`] in id order and applies each
+//! request through [`Scheduler::handle_request`], which records the outcome
+//! at the request's key. The pass then removes the object. A request whose
+//! record exists is not applied again, so a crash between the record and
+//! the removal does not apply the request twice.
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
@@ -33,7 +42,8 @@ use taquba_cron::{Backfill, BackfillStart, CronScheduler, Schedule, ScheduleHand
 use tokio_util::sync::CancellationToken;
 
 use crate::graph::Graph;
-use crate::records::{self, GraphRecord};
+use crate::records::{self, GraphRecord, RequestOutcome, RequestRecord};
+use crate::request::{Request, RequestId, RequestStore};
 use crate::scheduler::{Error, Pools, Scheduler, SchedulerOptions};
 use crate::trigger::{TRIGGERS_QUEUE, Trigger};
 
@@ -67,24 +77,39 @@ pub struct SyncReport {
     pub schedules: Vec<Schedule>,
 }
 
+/// The result of one request pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestReport {
+    /// The requests the pass applied, in id order, with the outcome of each.
+    pub applied: Vec<(RequestId, RequestOutcome)>,
+}
+
 /// The daemon.
 pub struct Daemon {
     queue: Arc<Queue>,
     scheduler: Arc<Scheduler>,
     pools: Arc<Pools>,
+    requests: RequestStore,
     clock: Arc<dyn Clock>,
     /// The keys of the refusals that were logged.
     logged: Mutex<HashSet<String>>,
 }
 
 impl Daemon {
-    /// A daemon over `queue` that runs `scheduler` and `pools`.
-    pub fn new(queue: Arc<Queue>, scheduler: Arc<Scheduler>, pools: Arc<Pools>) -> Self {
+    /// A daemon over `queue` that runs `scheduler` and `pools` and applies
+    /// the requests of `requests`.
+    pub fn new(
+        queue: Arc<Queue>,
+        scheduler: Arc<Scheduler>,
+        pools: Arc<Pools>,
+        requests: RequestStore,
+    ) -> Self {
         let clock = queue.clock();
         Daemon {
             queue,
             scheduler,
             pools,
+            requests,
             clock,
             logged: Mutex::new(HashSet::new()),
         }
@@ -143,6 +168,37 @@ impl Daemon {
         Ok(report)
     }
 
+    /// One request pass: applies every request object without a record and
+    /// removes every request object. An object that is not a request is
+    /// removed and logged. A request that fails on the store is logged and
+    /// stays for the next pass, and the pass continues with the next
+    /// request.
+    pub async fn apply_requests(&self) -> Result<RequestReport, Error> {
+        let mut report = RequestReport::default();
+        for (id, bytes) in self.requests.list().await? {
+            let key = records::request_key(&id);
+            if self.queue.kv_get(&key).await?.is_none() {
+                match Request::from_bytes(&bytes) {
+                    Ok(request) => match self.scheduler.handle_request(&id, &request).await {
+                        Ok(record) => {
+                            log_outcome(&id, &record);
+                            report.applied.push((id.clone(), record.outcome));
+                        }
+                        Err(e) => {
+                            tracing::warn!(request = %id, error = %e, "request failed");
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(request = %id, error = %e, "the object is not a request");
+                    }
+                }
+            }
+            self.requests.remove(&id).await?;
+        }
+        Ok(report)
+    }
+
     /// Runs the pools, the scheduler, the sync pass at its interval and the
     /// cron entries until `shutdown` resolves.
     pub async fn run<F: Future<Output = ()>>(
@@ -165,6 +221,9 @@ impl Daemon {
             match self.sync().await {
                 Ok(report) => self.register(&handle, report.schedules),
                 Err(e) => tracing::warn!(error = %e, "sync pass failed"),
+            }
+            if let Err(e) = self.apply_requests().await {
+                tracing::warn!(error = %e, "request pass failed");
             }
             tokio::select! {
                 () = tokio::time::sleep(options.sync_interval) => {}
@@ -281,6 +340,17 @@ impl Daemon {
             .kv_put(&records::graph_key(name), &record.to_bytes())
             .await?;
         Ok(())
+    }
+}
+
+fn log_outcome(id: &RequestId, record: &RequestRecord) {
+    match &record.outcome {
+        RequestOutcome::Refused { reason } => {
+            tracing::warn!(request = %id, %reason, "request refused");
+        }
+        outcome => {
+            tracing::info!(request = %id, ?outcome, "request applied");
+        }
     }
 }
 
