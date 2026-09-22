@@ -170,6 +170,7 @@ pub mod hook;
 pub mod input;
 pub mod operator;
 pub mod partition;
+pub mod readiness;
 pub mod records;
 pub mod request;
 pub mod scheduler;
@@ -187,15 +188,14 @@ pub use graph::{Graph, GraphSpec, Node, NodeKind, NodeSpec, Partitioning, Proble
 pub use hook::{EVENTS_QUEUE, Event, RecordHook};
 pub use operator::{Operator, OperatorSet, Outcome, Task};
 pub use partition::Partition;
+pub use readiness::NodeState;
 pub use records::{
     GraphRecord, GraphRunRecord, GraphRunState, JsonBytes, NodeRecord, RecordStatus,
     RequestOutcome, RequestRecord,
 };
 pub use request::{Request, RequestId, RequestStore};
 pub use scheduler::{Pools, Scheduler, SchedulerOptions, StartOutcome};
-pub use status::{
-    GraphRunStatus, GraphStatus, NodeState, NodeStatus, RunCounts, RunSummary, StatusReader,
-};
+pub use status::{GraphRunStatus, GraphStatus, NodeStatus, RunCounts, RunSummary, StatusReader};
 pub use task::TaskIdentity;
 pub use template::Template;
 pub use trigger::{TRIGGERS_QUEUE, Trigger};

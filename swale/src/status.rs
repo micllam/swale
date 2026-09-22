@@ -6,9 +6,8 @@
 //! reads from the store, so it can run alongside the process that opened the
 //! store. Its view lags that process by the flush interval of the writer.
 //!
-//! The state of a node ([`NodeState`]) is derived from the records alone
-//! ([`node_states`]). A node without a record is ready, waiting or blocked,
-//! by the readiness rule of the scheduler.
+//! The state of a node ([`NodeState`]) is derived from the records alone, by
+//! the readiness rule of [`crate::readiness`].
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -18,14 +17,13 @@ use taquba::object_store::ObjectStore;
 use taquba::{JobRecord, QueueReader, QueueStats, ReaderMode, ReaderOptions};
 
 use crate::definition_store::{DefinitionError, DefinitionStore};
-use crate::graph::{Graph, Node, TriggerRule};
 use crate::partition::Partition;
+use crate::readiness::{NodeState, node_states};
 use crate::records::{
     self, Entry, GRAPH_RUNS_PREFIX, GRAPHS_PREFIX, GraphRecord, GraphRunRecord, GraphRunState,
-    NodeRecord, ReadError, RecordError, RecordStatus, RequestRecord,
+    NodeRecord, ReadError, RecordError, RequestRecord,
 };
 use crate::request::RequestId;
-use crate::scheduler::is_ready;
 
 /// A failure of a status read.
 #[derive(Debug, thiserror::Error)]
@@ -50,113 +48,6 @@ impl From<ReadError> for Error {
             ReadError::Queue(e) => Error::Queue(e),
             ReadError::Record(e) => Error::Record(e),
         }
-    }
-}
-
-/// The state of a node in a graph run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeState {
-    /// The record is succeeded.
-    Succeeded,
-    /// The record is failed.
-    Failed,
-    /// The record is cancelled.
-    Cancelled,
-    /// The node does not have a record, and the records of its upstreams
-    /// satisfy its trigger rule. The scheduler submits the node, and its
-    /// task instance runs or waits in the queue of its pool.
-    Ready,
-    /// The node does not have a record, and an upstream without a record can
-    /// still satisfy its trigger rule.
-    Waiting,
-    /// The node does not have a record, and the records of its upstreams
-    /// cannot satisfy its trigger rule until a rerun changes a record.
-    Blocked,
-}
-
-impl NodeState {
-    /// The lowercase name, as in the JSON form.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            NodeState::Succeeded => "succeeded",
-            NodeState::Failed => "failed",
-            NodeState::Cancelled => "cancelled",
-            NodeState::Ready => "ready",
-            NodeState::Waiting => "waiting",
-            NodeState::Blocked => "blocked",
-        }
-    }
-
-    /// Whether a record can still follow: the node is ready or waiting.
-    fn is_open(&self) -> bool {
-        matches!(self, NodeState::Ready | NodeState::Waiting)
-    }
-}
-
-impl std::fmt::Display for NodeState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl From<RecordStatus> for NodeState {
-    fn from(status: RecordStatus) -> Self {
-        match status {
-            RecordStatus::Succeeded => NodeState::Succeeded,
-            RecordStatus::Failed => NodeState::Failed,
-            RecordStatus::Cancelled => NodeState::Cancelled,
-        }
-    }
-}
-
-/// The state of every node of `graph`, by node name, from the node records
-/// of one partition, by node name.
-pub fn node_states(
-    graph: &Graph,
-    records: &BTreeMap<String, NodeRecord>,
-) -> BTreeMap<String, NodeState> {
-    let mut states: BTreeMap<String, NodeState> = BTreeMap::new();
-    // The graph is acyclic, so every pass resolves at least one node.
-    while states.len() < graph.nodes().len() {
-        for node in graph.nodes() {
-            if states.contains_key(node.name()) {
-                continue;
-            }
-            if let Some(record) = records.get(node.name()) {
-                states.insert(node.name().to_string(), record.status.into());
-                continue;
-            }
-            let upstreams: Option<Vec<NodeState>> = node
-                .upstreams()
-                .iter()
-                .map(|name| states.get(name).copied())
-                .collect();
-            let Some(upstreams) = upstreams else {
-                continue;
-            };
-            let state = if is_ready(node, records) {
-                NodeState::Ready
-            } else if can_become_ready(node, &upstreams) {
-                NodeState::Waiting
-            } else {
-                NodeState::Blocked
-            };
-            states.insert(node.name().to_string(), state);
-        }
-    }
-    states
-}
-
-/// Whether a record that follows for an open upstream can satisfy the
-/// trigger rule of `node`, which its present records do not satisfy.
-fn can_become_ready(node: &Node, upstreams: &[NodeState]) -> bool {
-    match node.trigger_rule() {
-        TriggerRule::AllSucceeded => upstreams
-            .iter()
-            .all(|state| *state == NodeState::Succeeded || state.is_open()),
-        TriggerRule::AllDone => upstreams.iter().all(|state| *state != NodeState::Blocked),
-        TriggerRule::OneFailed => upstreams.iter().any(NodeState::is_open),
     }
 }
 
@@ -385,109 +276,4 @@ fn graph_entry<'a>(
             runs: RunCounts::default(),
             latest: None,
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::operator::OperatorSet;
-
-    /// `on_failure` runs when `a` fails, `join` needs `b` and `on_failure`,
-    /// and `report` runs when `join` is done.
-    const DEFINITION: &str = r#"
-[graph]
-name = "g"
-
-[[node]]
-name = "a"
-produces = "a_out"
-operator = "subprocess"
-[node.params]
-argv = ["true"]
-
-[[node]]
-name = "b"
-produces = "b_out"
-consumes = ["a_out"]
-operator = "subprocess"
-[node.params]
-argv = ["true"]
-
-[[node]]
-name = "on_failure"
-after = ["a"]
-trigger_rule = "one_failed"
-operator = "subprocess"
-[node.params]
-argv = ["true"]
-
-[[node]]
-name = "join"
-after = ["b", "on_failure"]
-operator = "subprocess"
-[node.params]
-argv = ["true"]
-
-[[node]]
-name = "report"
-after = ["join"]
-trigger_rule = "all_done"
-operator = "subprocess"
-[node.params]
-argv = ["true"]
-"#;
-
-    fn record(status: RecordStatus) -> NodeRecord {
-        NodeRecord {
-            status,
-            run_id: "run".into(),
-            definition: "abc".into(),
-            rerun: 0,
-            terminated_at_ms: 0,
-            output: None,
-            output_omitted: false,
-            error: None,
-        }
-    }
-
-    fn states(records: &[(&str, RecordStatus)]) -> Vec<NodeState> {
-        let graph = crate::load_str(DEFINITION, &OperatorSet::builtin()).unwrap();
-        let records = records
-            .iter()
-            .map(|(name, status)| (name.to_string(), record(*status)))
-            .collect();
-        let states = node_states(&graph, &records);
-        ["a", "b", "on_failure", "join", "report"]
-            .map(|name| states[name])
-            .to_vec()
-    }
-
-    #[test]
-    fn a_node_without_a_record_is_ready_waiting_or_blocked_by_its_trigger_rule() {
-        use NodeState::*;
-        assert_eq!(states(&[]), [Ready, Waiting, Waiting, Waiting, Waiting]);
-        // A succeeded `a` blocks `on_failure`, which blocks `join` and
-        // `report`.
-        assert_eq!(
-            states(&[("a", RecordStatus::Succeeded)]),
-            [Succeeded, Ready, Blocked, Blocked, Blocked]
-        );
-        assert_eq!(
-            states(&[("a", RecordStatus::Failed)]),
-            [Failed, Blocked, Ready, Blocked, Blocked]
-        );
-        assert_eq!(
-            states(&[("a", RecordStatus::Cancelled)]),
-            [Cancelled, Blocked, Blocked, Blocked, Blocked]
-        );
-        assert_eq!(
-            states(&[
-                ("a", RecordStatus::Failed),
-                ("b", RecordStatus::Succeeded),
-                ("on_failure", RecordStatus::Succeeded),
-                ("join", RecordStatus::Failed),
-            ]),
-            [Failed, Succeeded, Succeeded, Failed, Ready]
-        );
-    }
 }
