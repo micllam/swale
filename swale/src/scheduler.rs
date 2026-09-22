@@ -190,6 +190,20 @@ pub struct StartOutcome {
     pub submitted: Vec<RunId>,
 }
 
+/// The result of [`Scheduler::rerun`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RerunOutcome {
+    /// The task instance at the next rerun count was submitted.
+    Submitted(RunId),
+    /// The task instance at the next rerun count is active from an earlier
+    /// rerun, so nothing was submitted.
+    Active(RunId),
+    /// The node does not have a record.
+    NoRecord,
+    /// The records of the node's upstreams do not satisfy its trigger rule.
+    NotReady,
+}
+
 /// Counts of one reconciler pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileReport {
@@ -285,30 +299,27 @@ impl Scheduler {
     /// upstreams satisfy its trigger rule. The graph run returns to the
     /// active state. After a succeeded record, the graph run record expects
     /// the next count of the node and of every node in its
-    /// [`rerun_scope`], so each runs again with the new outputs. `None` when
-    /// the node's record is absent, or when the node is not ready.
+    /// [`rerun_scope`], so each runs again with the new outputs. The outcome
+    /// states the run id submitted, or why the node was not rerun.
     pub async fn rerun(
         &self,
         graph_name: &str,
         partition: &Partition,
         node: &str,
-    ) -> Result<Option<RunId>, Error> {
-        let submitted = self
-            .rerun_with(graph_name, partition, node, |_| HashMap::new())
-            .await?;
-        Ok(submitted.ok().map(|(run_id, _)| run_id))
+    ) -> Result<RerunOutcome, Error> {
+        self.rerun_with(graph_name, partition, node, |_| HashMap::new())
+            .await
     }
 
     /// [`Self::rerun`] with the KV writes of `kv_writes`, given the run id,
-    /// committed with the submit. Returns the run id and whether the submit
-    /// was new, or the reason the node was not rerun.
+    /// committed with the submit.
     pub(crate) async fn rerun_with(
         &self,
         graph_name: &str,
         partition: &Partition,
         node: &str,
         kv_writes: impl FnOnce(&RunId) -> HashMap<Vec<u8>, Vec<u8>>,
-    ) -> Result<Result<(RunId, bool), NotRerun>, Error> {
+    ) -> Result<RerunOutcome, Error> {
         let key = records::graph_run_key(graph_name, partition);
         let Some((run, bytes)) = self.graph_run(&key).await? else {
             return Err(Error::UnknownGraphRun {
@@ -323,7 +334,7 @@ impl Scheduler {
         })?;
         let records = self.node_records(&graph, partition).await?;
         let Some(record) = records.get(node.name()) else {
-            return Ok(Err(NotRerun::NoRecord));
+            return Ok(RerunOutcome::NoRecord);
         };
         let mut active = GraphRunRecord {
             state: GraphRunState::Active,
@@ -340,7 +351,7 @@ impl Scheduler {
         }
         let current = current_records(&active, &records);
         if !is_ready(node, &current) {
-            return Ok(Err(NotRerun::NotReady));
+            return Ok(RerunOutcome::NotReady);
         }
         if active != run
             && !self
@@ -360,10 +371,14 @@ impl Scheduler {
             node,
             record.rerun + 1,
         );
-        let submitted = self
+        let (run_id, new) = self
             .submit_node(node, identity, &upstream_records(node, &current), kv_writes)
             .await?;
-        Ok(Ok(submitted))
+        Ok(if new {
+            RerunOutcome::Submitted(run_id)
+        } else {
+            RerunOutcome::Active(run_id)
+        })
     }
 
     /// Cancels the graph run: writes the cancelled state and cancels every
@@ -829,24 +844,6 @@ fn identity(
         asset: node.asset().map(str::to_string),
         definition: hash.to_string(),
         rerun,
-    }
-}
-
-/// Why a rerun did not submit a task instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NotRerun {
-    /// The node does not have a record.
-    NoRecord,
-    /// The records of the node's upstreams do not satisfy its trigger rule.
-    NotReady,
-}
-
-impl std::fmt::Display for NotRerun {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            NotRerun::NoRecord => "does not have a record",
-            NotRerun::NotReady => "is not ready: its upstreams do not satisfy its trigger rule",
-        })
     }
 }
 

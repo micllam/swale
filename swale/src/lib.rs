@@ -202,7 +202,7 @@ pub use records::{
     RequestOutcome, RequestRecord,
 };
 pub use request::{Request, RequestId, RequestStore};
-pub use scheduler::{Scheduler, SchedulerOptions, StartOutcome, TRIGGERS_QUEUE};
+pub use scheduler::{RerunOutcome, Scheduler, SchedulerOptions, StartOutcome, TRIGGERS_QUEUE};
 pub use status::{GraphRunStatus, GraphStatus, NodeStatus, RunCounts, RunSummary, StatusReader};
 pub use task::TaskIdentity;
 pub use template::Template;

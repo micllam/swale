@@ -9,7 +9,8 @@ use swale::JsonBytes;
 use swale::records::{GraphRunRecord, GraphRunState, NodeRecord, RecordStatus, graph_run_key};
 use swale::scheduler::ReconcileReport;
 use swale::{
-    DefinitionStore, OperatorSet, Partition, Pools, RecordHook, Scheduler, SchedulerOptions,
+    DefinitionStore, OperatorSet, Partition, Pools, RecordHook, RerunOutcome, Scheduler,
+    SchedulerOptions,
 };
 use taquba::{MockClock, Queue};
 use taquba_workflow::RunState;
@@ -215,6 +216,10 @@ async fn a_graph_run_completes_with_records_and_outputs_flow_through_templates()
     assert_eq!(summary["upstreams"]["transform"]["status"], "succeeded");
 }
 
+fn submitted(run_id: &str) -> RerunOutcome {
+    RerunOutcome::Submitted(run_id.parse().unwrap())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_start_for_the_same_partition_changes_nothing() {
     let h = Harness::start(&definition_text(TRANSFORM_OK), true).await;
@@ -292,7 +297,7 @@ async fn a_dead_lettered_node_fails_the_run_blocks_its_downstream_and_a_rerun_re
         .rerun("orders", &Harness::partition(), "transform")
         .await
         .unwrap();
-    assert_eq!(rerun.unwrap().as_str(), "orders-20260915-transform-r1");
+    assert_eq!(rerun, submitted("orders-20260915-transform-r1"));
     let run = h.wait_for_state(GraphRunState::Complete).await;
     assert_eq!(run.state, GraphRunState::Complete);
     let transform = h
@@ -325,7 +330,7 @@ async fn a_rerun_of_a_succeeded_node_runs_its_downstreams_again() {
         .rerun("orders", &Harness::partition(), "extract")
         .await
         .unwrap();
-    assert_eq!(rerun.unwrap().as_str(), "orders-20260915-extract-r1");
+    assert_eq!(rerun, submitted("orders-20260915-extract-r1"));
     let run = h.wait_for_state(GraphRunState::Complete).await;
     assert!(run.expected_reruns.is_empty(), "{run:?}");
     for (key, run_id) in [
@@ -358,7 +363,7 @@ async fn a_rerun_of_a_succeeded_node_runs_its_downstreams_again() {
         .rerun("orders", &Harness::partition(), "transform")
         .await
         .unwrap();
-    assert_eq!(rerun.unwrap().as_str(), "orders-20260915-transform-r2");
+    assert_eq!(rerun, submitted("orders-20260915-transform-r2"));
     let run = h.graph_run().await.unwrap();
     assert_eq!(run.state, GraphRunState::Active);
     assert_eq!(
@@ -482,4 +487,49 @@ async fn the_reconciler_submits_ready_nodes_and_settles_the_run_without_events()
     let report = h.scheduler.reconcile().await.unwrap();
     assert_eq!(report.settled, 1);
     assert_eq!(h.graph_run().await.unwrap().state, GraphRunState::Failed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_states_the_run_id_submitted_or_why_the_node_was_not_rerun() {
+    // No worker runs, so a submitted rerun stays pending.
+    let h = Harness::start(&definition_text(TRANSFORM_OK), false).await;
+    let key = graph_run_key("orders", &Harness::partition());
+    let run = GraphRunRecord {
+        definition: h.hash.clone(),
+        requested_at_ms: 0,
+        state: GraphRunState::Active,
+        expected_reruns: BTreeMap::new(),
+    };
+    h.queue.kv_put(&key, &run.to_bytes()).await.unwrap();
+    h.write_record(
+        "swale/assets/orders_raw/20260915",
+        RecordStatus::Succeeded,
+        Some(serde_json::json!({"rows": 3})),
+    )
+    .await;
+    h.write_record(
+        "swale/assets/orders_clean/20260915",
+        RecordStatus::Succeeded,
+        Some(serde_json::json!({"rows": 3})),
+    )
+    .await;
+    let rerun = async |node: &str| {
+        h.scheduler
+            .rerun("orders", &Harness::partition(), node)
+            .await
+            .unwrap()
+    };
+
+    assert_eq!(rerun("load").await, RerunOutcome::NoRecord);
+    assert_eq!(
+        rerun("extract").await,
+        submitted("orders-20260915-extract-r1")
+    );
+    // The record of `extract` is superseded until its rerun is recorded,
+    // so `transform` is not ready, and the rerun of `extract` is pending.
+    assert_eq!(rerun("transform").await, RerunOutcome::NotReady);
+    assert_eq!(
+        rerun("extract").await,
+        RerunOutcome::Active("orders-20260915-extract-r1".parse().unwrap())
+    );
 }

@@ -27,7 +27,7 @@ use taquba_workflow::RunId;
 use crate::partition::Partition;
 use crate::records::JsonBytes;
 use crate::records::{self, RequestOutcome, RequestRecord};
-use crate::scheduler::{Error, Scheduler};
+use crate::scheduler::{Error, RerunOutcome, Scheduler};
 use crate::store::ObjectPrefix;
 
 /// Maximum length of a request id in bytes.
@@ -213,23 +213,21 @@ impl Scheduler {
                         run_id: run_id.to_string(),
                     })
                 };
-                let submitted = self
+                let outcome = self
                     .rerun_with(graph, partition, node, |run_id| {
                         HashMap::from([(key.clone(), rerun_record(run_id).to_bytes())])
                     })
                     .await;
-                match submitted {
-                    Ok(Ok((run_id, true))) => return Ok(rerun_record(&run_id)),
-                    Ok(Ok((run_id, false))) => RequestOutcome::Refused {
-                        reason: format!("the rerun `{run_id}` is active"),
-                    },
-                    Ok(Err(reason)) => RequestOutcome::Refused {
-                        reason: format!("node `{node}` {reason}"),
-                    },
-                    Err(e) => RequestOutcome::Refused {
-                        reason: refusal(e)?,
-                    },
-                }
+                let reason = match outcome {
+                    Ok(RerunOutcome::Submitted(run_id)) => return Ok(rerun_record(&run_id)),
+                    Ok(RerunOutcome::Active(run_id)) => format!("the rerun `{run_id}` is active"),
+                    Ok(RerunOutcome::NoRecord) => format!("node `{node}` does not have a record"),
+                    Ok(RerunOutcome::NotReady) => format!(
+                        "node `{node}` is not ready: its upstreams do not satisfy its trigger rule"
+                    ),
+                    Err(e) => refusal(e)?,
+                };
+                RequestOutcome::Refused { reason }
             }
             Request::Cancel { graph, partition } => {
                 if self.cancel_run(graph, partition).await? {
