@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::graph::Node;
 use crate::records::{JsonBytes, NodeRecord, RecordStatus};
 use crate::task::TaskIdentity;
-use crate::template::{RenderContext, RenderError, Template};
+use crate::template::{RenderContext, RenderError, RunContext, Template};
 
 /// The payload of a task instance's run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,15 +76,23 @@ impl TaskInput {
         .to_string()
     }
 
-    /// The parameters with every template reference rendered.
-    pub fn rendered_params(&self, identity: &TaskIdentity) -> Result<Value, RenderError> {
+    /// The parameters with every template reference rendered, with `env` as
+    /// the environment variables of `{{ env.<NAME> }}`.
+    pub fn rendered_params(
+        &self,
+        identity: &TaskIdentity,
+        env: &BTreeMap<String, String>,
+    ) -> Result<Value, RenderError> {
         let run_id = identity.run_id();
         let summary = self.run_summary(identity);
         let ctx = RenderContext {
             partition: identity.partition.as_str(),
-            run_id: run_id.as_str(),
-            run_summary: &summary,
+            run: RunContext {
+                id: run_id.as_str(),
+                summary: &summary,
+            },
             upstream: &self.inputs,
+            env,
         };
         render_value(&self.params, &ctx)
     }
@@ -151,6 +159,7 @@ mod tests {
                         [nested]
                         id = "{{ run.id }}"
                         n = 1
+                        token = "{{ env.TOKEN }}"
                     "#
                     .parse()
                     .unwrap(),
@@ -219,12 +228,13 @@ mod tests {
             ),
         )]);
         let input = TaskInput::new(&node(), &records);
-        let params = input.rendered_params(&identity()).unwrap();
+        let env = BTreeMap::from([("TOKEN".to_string(), "t0k".to_string())]);
+        let params = input.rendered_params(&identity(), &env).unwrap();
         assert_eq!(
             params,
             serde_json::json!({
                 "argv": ["sh", "-c", "echo 3", "20260915"],
-                "nested": {"id": "g-20260915-load-r0", "n": 1},
+                "nested": {"id": "g-20260915-load-r0", "n": 1, "token": "t0k"},
             })
         );
         assert_eq!(
@@ -237,7 +247,7 @@ mod tests {
     fn rendering_fails_when_an_upstream_output_is_absent() {
         let input = TaskInput::new(&node(), &BTreeMap::new());
         assert_eq!(
-            input.rendered_params(&identity()),
+            input.rendered_params(&identity(), &BTreeMap::new()),
             Err(RenderError::MissingUpstream {
                 node: "extract".into()
             })

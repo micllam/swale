@@ -1,9 +1,18 @@
 //! The substitution language of a parameter string. A reference is written
 //! between `{{` and `}}`, and the language is substitution only.
 //!
-//! The references are `{{ partition }}`, `{{ run.id }}`, `{{ run.summary }}`
-//! and `{{ upstream.<node>.<path> }}`, where `<path>` is a dotted path into the
-//! upstream node's output and can be empty.
+//! The references:
+//!
+//! - `{{ partition }}`, the partition of the task instance.
+//! - `{{ run.<field> }}`, a field of the run: `id`, the run id of the task
+//!   instance, or `summary`, the summary of the graph run as JSON text.
+//! - `{{ upstream.<node>.<path> }}`, the output of an upstream node, or the
+//!   value at a dotted path into it.
+//! - `{{ env.<NAME> }}`, an environment variable of the process that renders
+//!   the template.
+//!
+//! A reference to an unset variable fails the task instance. The error of a
+//! failed `http` request includes the URL.
 
 use std::collections::BTreeMap;
 
@@ -12,12 +21,21 @@ use std::collections::BTreeMap;
 pub struct RenderContext<'a> {
     /// The partition of the task instance.
     pub partition: &'a str,
-    /// The run id of the task instance.
-    pub run_id: &'a str,
-    /// The summary of the graph run, JSON text.
-    pub run_summary: &'a str,
+    /// The run, for `{{ run.<field> }}`.
+    pub run: RunContext<'a>,
     /// The output of each upstream node with a succeeded record.
     pub upstream: &'a BTreeMap<String, serde_json::Value>,
+    /// The environment variables, by name.
+    pub env: &'a BTreeMap<String, String>,
+}
+
+/// The fields of the run of a task instance.
+#[derive(Debug, Clone, Copy)]
+pub struct RunContext<'a> {
+    /// The run id of the task instance.
+    pub id: &'a str,
+    /// The summary of the graph run, JSON text.
+    pub summary: &'a str,
 }
 
 /// A reference cannot be resolved against the [`RenderContext`].
@@ -38,6 +56,12 @@ pub enum RenderError {
         /// The dotted path.
         path: String,
     },
+    /// The environment variable is not set.
+    #[error("environment variable `{name}` is not set")]
+    MissingEnv {
+        /// The variable name.
+        name: String,
+    },
 }
 
 /// One piece of a parsed [`Template`].
@@ -47,13 +71,22 @@ enum Segment {
     Literal(String),
     /// The partition of the task instance.
     Partition,
-    /// The run id of the task instance.
-    RunId,
-    /// The summary of the graph run.
-    RunSummary,
+    /// A field of the run.
+    Run(RunField),
     /// A value from the output of an upstream node: the node's name and the
     /// dotted path into the output, split at the dots.
     Upstream { node: String, path: Vec<String> },
+    /// The environment variable of the name.
+    Env(String),
+}
+
+/// A field of the run, the part after `run.` in a reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunField {
+    /// `id`: the run id of the task instance.
+    Id,
+    /// `summary`: the summary of the graph run.
+    Summary,
 }
 
 /// A parsed parameter string.
@@ -115,8 +148,8 @@ impl Template {
             match segment {
                 Segment::Literal(text) => out.push_str(text),
                 Segment::Partition => out.push_str(ctx.partition),
-                Segment::RunId => out.push_str(ctx.run_id),
-                Segment::RunSummary => out.push_str(ctx.run_summary),
+                Segment::Run(RunField::Id) => out.push_str(ctx.run.id),
+                Segment::Run(RunField::Summary) => out.push_str(ctx.run.summary),
                 Segment::Upstream { node, path } => {
                     let mut value = ctx
                         .upstream
@@ -140,6 +173,13 @@ impl Template {
                         other => out.push_str(&other.to_string()),
                     }
                 }
+                Segment::Env(name) => {
+                    let value = ctx
+                        .env
+                        .get(name)
+                        .ok_or_else(|| RenderError::MissingEnv { name: name.clone() })?;
+                    out.push_str(value);
+                }
             }
         }
         Ok(out)
@@ -149,10 +189,22 @@ impl Template {
 fn reference(text: &str) -> Result<Segment, TemplateError> {
     match text {
         "partition" => Ok(Segment::Partition),
-        "run.id" => Ok(Segment::RunId),
-        "run.summary" => Ok(Segment::RunSummary),
         _ => {
             let unknown = || TemplateError::UnknownReference(text.to_string());
+            if let Some(field) = text.strip_prefix("run.") {
+                return match field {
+                    "id" => Ok(Segment::Run(RunField::Id)),
+                    "summary" => Ok(Segment::Run(RunField::Summary)),
+                    _ => Err(unknown()),
+                };
+            }
+            if let Some(name) = text.strip_prefix("env.") {
+                return if is_env_name(name) {
+                    Ok(Segment::Env(name.to_string()))
+                } else {
+                    Err(unknown())
+                };
+            }
             let rest = text.strip_prefix("upstream.").ok_or_else(unknown)?;
             let mut parts = rest.split('.').map(str::to_string);
             let node = parts.next().expect("a split yields one item");
@@ -165,6 +217,16 @@ fn reference(text: &str) -> Result<Segment, TemplateError> {
     }
 }
 
+/// Whether `name` is an environment variable name of the form
+/// `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,7 +234,7 @@ mod tests {
     #[test]
     fn parses_literals_and_each_reference_in_source_order() {
         let template = Template::parse(
-            "a/{{ partition }}/{{run.id}}-{{ run.summary }}{{ upstream.extract.rows.key }}",
+            "a/{{ partition }}/{{run.id}}-{{ run.summary }}{{ upstream.extract.rows.key }}{{ env.TOKEN }}",
         )
         .unwrap();
         assert_eq!(
@@ -181,13 +243,14 @@ mod tests {
                 Segment::Literal("a/".into()),
                 Segment::Partition,
                 Segment::Literal("/".into()),
-                Segment::RunId,
+                Segment::Run(RunField::Id),
                 Segment::Literal("-".into()),
-                Segment::RunSummary,
+                Segment::Run(RunField::Summary),
                 Segment::Upstream {
                     node: "extract".into(),
                     path: vec!["rows".into(), "key".into()],
                 },
+                Segment::Env("TOKEN".into()),
             ]
         );
     }
@@ -218,11 +281,15 @@ mod tests {
             "extract".to_string(),
             serde_json::json!({"rows": 3, "key": "a/b", "list": [{"x": true}]}),
         )]);
+        let env = BTreeMap::from([("TOKEN".to_string(), "t0k".to_string())]);
         let ctx = RenderContext {
             partition: "20260915",
-            run_id: "g-20260915-load-r0",
-            run_summary: "{}",
+            run: RunContext {
+                id: "g-20260915-load-r0",
+                summary: "{}",
+            },
             upstream: &upstream,
+            env: &env,
         };
         let render = |text: &str| Template::parse(text).unwrap().render(&ctx);
         assert_eq!(
@@ -249,6 +316,13 @@ mod tests {
                 path: "rows.deeper".into(),
             })
         );
+        assert_eq!(render("Bearer {{ env.TOKEN }}").unwrap(), "Bearer t0k");
+        assert_eq!(
+            render("{{ env.OTHER }}"),
+            Err(RenderError::MissingEnv {
+                name: "OTHER".into()
+            })
+        );
     }
 
     #[test]
@@ -267,6 +341,11 @@ mod tests {
             "{{ upstream. }}",
             "{{ upstream.a..b }}",
             "{{ run }}",
+            "{{ run.node }}",
+            "{{ env. }}",
+            "{{ env.1A }}",
+            "{{ env.A.B }}",
+            "{{ env.A-B }}",
         ] {
             assert!(
                 matches!(

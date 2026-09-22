@@ -31,7 +31,7 @@ retries = 5
 [node.params]
 method = "POST"
 url = "https://warehouse.example/load"
-headers = { "Content-Type" = "application/json" }
+headers = { "Content-Type" = "application/json", "Authorization" = "Bearer {{ env.WAREHOUSE_TOKEN }}" }
 body = '{"partition": "{{ partition }}", "rows_key": "{{ upstream.transform.rows_key }}"}'
 timeout = "10m"
 

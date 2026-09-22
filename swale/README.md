@@ -60,8 +60,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Operators
 
 An operator runs a node, and its parameters are the `params` table of the
-node. The output of a node is JSON, and a downstream template reads a path
-into it with `{{ upstream.<node>.<path> }}`.
+node. A parameter string refers to `{{ partition }}`, `{{ run.<field> }}`
+(`id` or `summary`), `{{ upstream.<node>.<path> }}` and `{{ env.<NAME> }}`.
+The upstream reference is a path into the JSON output of an upstream node,
+and the env reference is an environment variable of the daemon.
 
 - **`subprocess`** runs `argv` with a JSON document on stdin (the identity,
   the parameters and the upstream outputs) and reads the output from stdout.

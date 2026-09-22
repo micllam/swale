@@ -56,9 +56,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each such node must reach, `GraphRunRecord::is_current` states whether a
   record reached it, and the readiness rule reads the current records alone
   (`readiness::current_records`, `readiness::rerun_scope`).
+- The `{{ env.<NAME> }}` template reference, an environment variable of the
+  daemon rendered at dispatch. A reference to an unset variable fails the
+  task instance, and `Dispatch::with_env` builds a runner with given
+  variables.
 
 ### Changed
 
+- **Breaking:** `RenderContext` has the `run` and `env` fields in place of
+  `run_id` and `run_summary`, `TaskInput::rendered_params` takes the
+  environment variables and `RenderError` has the `MissingEnv` variant. Pass
+  the variables where the parameters are rendered, and add a wildcard arm to
+  an exhaustive match.
 - **Breaking:** `DefinitionStore` stores every definition in the object store
   at `definitions/{hash}.toml` within the store prefix, so a graph run resumes
   with its definition after the file changes. Construct it with

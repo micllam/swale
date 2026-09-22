@@ -1,7 +1,9 @@
 //! The step runner of every pool: it reads the task input from the payload
 //! and the identity from the headers, renders the parameters and runs the
-//! operator.
+//! operator. An `{{ env.<NAME> }}` reference renders from the environment
+//! of the process, read once when the runner is built.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use taquba_workflow::{Step, StepError, StepOutcome, StepRunner};
@@ -15,12 +17,27 @@ use crate::task::TaskIdentity;
 #[derive(Debug, Clone)]
 pub struct Dispatch {
     operators: Arc<OperatorSet>,
+    env: Arc<BTreeMap<String, String>>,
 }
 
 impl Dispatch {
-    /// A runner over `operators`.
+    /// A runner over `operators` with the environment of the process as the
+    /// variables of `{{ env.<NAME> }}`. A variable whose name or value is
+    /// not UTF-8 is omitted.
     pub fn new(operators: Arc<OperatorSet>) -> Self {
-        Dispatch { operators }
+        let env = std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .collect();
+        Dispatch::with_env(operators, env)
+    }
+
+    /// A runner over `operators` with `env` as the variables of
+    /// `{{ env.<NAME> }}`.
+    pub fn with_env(operators: Arc<OperatorSet>, env: BTreeMap<String, String>) -> Self {
+        Dispatch {
+            operators,
+            env: Arc::new(env),
+        }
     }
 }
 
@@ -33,7 +50,7 @@ impl StepRunner for Dispatch {
         })?;
         // A reference to an absent output is a failure of the task. The hook
         // records it and the downstream rules see it.
-        let params = match input.rendered_params(&identity) {
+        let params = match input.rendered_params(&identity, &self.env) {
             Ok(params) => params,
             Err(e) => {
                 return Ok(StepOutcome::Fail {
@@ -62,8 +79,6 @@ impl StepRunner for Dispatch {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use serde::Deserialize;
     use taquba_workflow::StepErrorKind;
 
@@ -92,7 +107,10 @@ mod tests {
     fn dispatch() -> Dispatch {
         let mut set = OperatorSet::new();
         set.add("echo", Echo);
-        Dispatch::new(Arc::new(set))
+        Dispatch::with_env(
+            Arc::new(set),
+            BTreeMap::from([("TOKEN".to_string(), "t0k".to_string())]),
+        )
     }
 
     fn step(operator: &str, text: &str, inputs: BTreeMap<String, serde_json::Value>) -> Step {
@@ -131,6 +149,26 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(outcome, StepOutcome::Fail { reason } if reason == "asked to"));
+    }
+
+    #[tokio::test]
+    async fn an_env_reference_renders_from_the_environment_of_the_runner() {
+        let outcome = dispatch()
+            .run_step(&step("echo", "Bearer {{ env.TOKEN }}", BTreeMap::new()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(&outcome, StepOutcome::Succeed { result } if result == br#"{"text":"Bearer t0k"}"#),
+            "{outcome:?}"
+        );
+        let outcome = dispatch()
+            .run_step(&step("echo", "{{ env.OTHER }}", BTreeMap::new()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(&outcome, StepOutcome::Fail { reason } if reason == "environment variable `OTHER` is not set"),
+            "{outcome:?}"
+        );
     }
 
     #[tokio::test]
