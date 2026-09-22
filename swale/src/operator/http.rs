@@ -199,6 +199,8 @@ mod tests {
             identity: &identity,
             params: &value,
             inputs: &inputs,
+            state: None,
+            now_ms: 0,
         };
         Http::default().run(&task, params).await
     }

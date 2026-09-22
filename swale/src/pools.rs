@@ -106,10 +106,11 @@ impl Pools {
         operators: Arc<OperatorSet>,
         hook: RecordHook,
     ) -> PoolsBuilder {
+        let dispatch = Dispatch::new(operators, queue.clock());
         PoolsBuilder {
             queue,
             store,
-            dispatch: Dispatch::new(operators),
+            dispatch,
             hook,
             poll_interval: Duration::from_millis(250),
             memo_retention: Duration::from_secs(7 * 86_400),

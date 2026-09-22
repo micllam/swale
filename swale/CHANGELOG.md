@@ -60,9 +60,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon rendered at dispatch. A reference to an unset variable fails the
   task instance, and `Dispatch::with_env` builds a runner with given
   variables.
+- The `object_exists` operator, which polls a store URL every `interval`
+  until the object exists or `timeout` passes after the first poll. Each
+  poll is a step of the run, so no worker is held between polls, and the
+  crate depends on `url`.
+- `Outcome::Continue`, with which an operator ends a step and continues the
+  run after a delay with a state, which the next step reads as `Task::state`.
+  `Task::now_ms` is the time of the step, and `store::provider_options` reads
+  the object store options of a URL from the environment.
 
 ### Changed
 
+- **Breaking:** `Dispatch::new` and `Dispatch::with_env` take the clock of
+  the store, `Task` has the `state` and `now_ms` fields and `Outcome` has
+  the `Continue` variant. Pass the queue's clock, and add a wildcard arm to
+  an exhaustive match.
 - **Breaking:** `RenderContext` has the `run` and `env` fields in place of
   `run_id` and `run_summary`, `TaskInput::rendered_params` takes the
   environment variables and `RenderError` has the `MissingEnv` variant. Pass

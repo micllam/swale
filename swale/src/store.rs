@@ -2,6 +2,7 @@
 //! the store prefix of the `--store` URL. [`store_path`] joins the prefix the
 //! one way, and an [`ObjectPrefix`] is the objects within one such path.
 
+use std::ffi::OsString;
 use std::sync::Arc;
 
 use taquba::object_store::path::Path as ObjectPath;
@@ -14,6 +15,24 @@ pub fn store_path(store_prefix: &str, name: &str) -> String {
     } else {
         format!("{store_prefix}/{name}")
     }
+}
+
+/// The object store options among the environment variables `vars`: the
+/// variables of the three providers, with the name in lower case as the
+/// option key. The prefixes exclude a variable of another program whose lower
+/// case name is an option key, such as `TOKEN` or `ENDPOINT`. A variable
+/// whose name or value is not UTF-8 is omitted.
+pub fn provider_options(
+    vars: impl Iterator<Item = (OsString, OsString)>,
+) -> impl Iterator<Item = (String, String)> {
+    vars.filter_map(|(name, value)| {
+        let key = name.into_string().ok()?.to_ascii_lowercase();
+        let value = value.into_string().ok()?;
+        ["aws_", "google_", "azure_"]
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+            .then_some((key, value))
+    })
 }
 
 /// An object store and the prefix its objects are within. An absent object
@@ -77,6 +96,28 @@ impl ObjectPrefix {
 mod tests {
     use super::*;
     use taquba::object_store::memory::InMemory;
+
+    #[test]
+    fn the_provider_options_are_the_provider_variables_in_lower_case() {
+        let vars = [
+            ("AWS_ENDPOINT", "http://127.0.0.1:9000"),
+            ("ENDPOINT", "other"),
+            ("GOOGLE_SERVICE_ACCOUNT", "sa.json"),
+            ("AZURE_STORAGE_ACCOUNT_NAME", "account"),
+            ("HOME", "/home/u"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let options: Vec<(String, String)> = provider_options(vars.into_iter()).collect();
+        assert_eq!(
+            options,
+            [
+                ("aws_endpoint", "http://127.0.0.1:9000"),
+                ("google_service_account", "sa.json"),
+                ("azure_storage_account_name", "account"),
+            ]
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+        );
+    }
 
     #[test]
     fn an_empty_prefix_gives_the_bare_name() {

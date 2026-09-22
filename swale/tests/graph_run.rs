@@ -2,6 +2,7 @@
 //! hook, the events worker and the reconciler.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use swale::{
     SchedulerOptions,
 };
 use taquba::{MockClock, Queue};
-use taquba_workflow::RunState;
+use taquba_workflow::{RunId, RunState};
 use tokio_util::sync::CancellationToken;
 
 mod common;
@@ -70,7 +71,7 @@ const TRANSFORM_OK: &str = "cat >/dev/null; printf '{\\\"rows\\\": %s}' \\\"$0\\
 
 struct Harness {
     queue: Arc<Queue>,
-    _clock: MockClock,
+    clock: MockClock,
     scheduler: Arc<Scheduler>,
     pools: Arc<Pools>,
     hash: String,
@@ -107,7 +108,7 @@ impl Harness {
         }
         Harness {
             queue,
-            _clock: clock,
+            clock,
             scheduler,
             pools,
             hash,
@@ -532,4 +533,66 @@ async fn a_rerun_states_the_run_id_submitted_or_why_the_node_was_not_rerun() {
         rerun("extract").await,
         RerunOutcome::Active("orders-20260915-extract-r1".parse().unwrap())
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_object_exists_node_polls_without_a_worker_until_the_object_exists() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("object_exists");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = format!(
+        r#"
+[graph]
+name = "orders"
+partition = "daily"
+
+[[node]]
+name = "arrival"
+produces = "landing_file"
+operator = "object_exists"
+[node.params]
+url = "file://{dir}/orders-{{{{ partition }}}}.parquet"
+interval = "1m"
+timeout = "1h"
+
+[[node]]
+name = "load"
+produces = "loaded"
+consumes = ["landing_file"]
+operator = "shell"
+[node.params]
+command = "printf '{{\"size\": {{{{ upstream.arrival.size }}}}}}'"
+"#,
+        dir = dir.display()
+    );
+    let h = Harness::start(&text, true).await;
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+
+    // The first poll ends without the object, and the run waits for its
+    // second step.
+    let runtime = h.pools.runtime("default").unwrap();
+    let run_id: RunId = "orders-20260915-arrival-r0".parse().unwrap();
+    common::wait_until("the first poll never ended", async || {
+        runtime
+            .status(&run_id)
+            .await
+            .unwrap()
+            .filter(|status| status.current_step >= 1)
+    })
+    .await;
+    std::fs::write(dir.join("orders-20260915.parquet"), b"12345").unwrap();
+    // The second poll is due one interval after the first, by the clock of
+    // the store.
+    h.clock.advance(Duration::from_secs(61));
+    h.wait_for_state(GraphRunState::Complete).await;
+    let arrival = h
+        .record("swale/assets/landing_file/20260915")
+        .await
+        .unwrap();
+    assert_eq!(arrival.output.as_ref().unwrap()["size"], 5);
+    let load = h.record("swale/assets/loaded/20260915").await.unwrap();
+    assert_eq!(load.output, Some(serde_json::json!({"size": 5})));
 }

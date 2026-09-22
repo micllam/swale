@@ -197,6 +197,8 @@ mod tests {
             identity: &identity,
             params: &params,
             inputs: &inputs,
+            state: None,
+            now_ms: 0,
         };
         let argv = SubprocessParams {
             argv: vec!["sh".into(), "-c".into(), script.into()],
@@ -259,6 +261,8 @@ mod tests {
             identity: &identity,
             params: &params,
             inputs: &inputs,
+            state: None,
+            now_ms: 0,
         };
         let err = Subprocess::default()
             .run(

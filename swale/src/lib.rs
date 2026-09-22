@@ -67,6 +67,10 @@
 //! - **`http`** sends `method`, `url`, `headers` and `body` within `timeout`
 //!   and outputs `{"status": <code>, "body": <value>}`, with a JSON body
 //!   parsed.
+//! - **`object_exists`** waits until an object exists at `url`, a store URL,
+//!   with a poll every `interval` and a failure after `timeout`. No worker
+//!   is held between polls, and the output is the URL, the size and the
+//!   last-modified time of the object.
 //!
 //! Exit code 0 and a 2xx status are success. Exit code 75, a 5xx status, a 429
 //! status, a connection failure and a timeout are transient errors, retried up

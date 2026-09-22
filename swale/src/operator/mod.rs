@@ -4,8 +4,13 @@
 //! An [`OperatorSet`] maps an operator name to a parameter check and, for an
 //! operator the process runs, to an [`Operator`]. [`OperatorSet::builtin`]
 //! contains the operators of this crate, which the submodules [`subprocess`],
-//! [`shell`] and [`http`] implement, and a consumer adds its own with
-//! [`OperatorSet::add`] or, for a check alone, [`OperatorSet::register`].
+//! [`shell`], [`http`] and [`object_exists`] implement, and a consumer adds
+//! its own with [`OperatorSet::add`] or, for a check alone,
+//! [`OperatorSet::register`].
+//!
+//! An operator that waits on an external condition ends each poll with
+//! [`Outcome::Continue`]: the run continues after a delay with the state of
+//! the poll, and no worker is held during the wait.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -21,10 +26,12 @@ use taquba_workflow::{Step, StepError};
 use crate::task::TaskIdentity;
 
 pub mod http;
+pub mod object_exists;
 pub mod shell;
 pub mod subprocess;
 
 use http::Http;
+use object_exists::ObjectExists;
 use shell::Shell;
 use subprocess::Subprocess;
 
@@ -40,16 +47,30 @@ pub struct Task<'a> {
     pub params: &'a Value,
     /// The output of each upstream node with a succeeded record.
     pub inputs: &'a BTreeMap<String, Value>,
+    /// The state of the previous step of the run, from its
+    /// [`Outcome::Continue`]. `None` on the first step.
+    pub state: Option<&'a Value>,
+    /// The time the step started, in milliseconds from the Unix epoch, by
+    /// the clock of the store.
+    pub now_ms: u64,
 }
 
-/// The outcome of an operator. An infrastructure failure is a [`StepError`]
-/// instead: transient for a retry, permanent for a dead-letter.
+/// The outcome of an operator. An infrastructure failure is a [`StepError`]:
+/// transient for a retry, permanent for a dead-letter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// The task instance succeeded with this output.
     Succeeded(Value),
     /// The task instance failed with this reason.
     Failed(String),
+    /// The step ended, and the run continues with a next step after `after`,
+    /// with `state` as [`Task::state`] of that step.
+    Continue {
+        /// The state of the next step.
+        state: Value,
+        /// The delay before the next step.
+        after: Duration,
+    },
 }
 
 /// An operator the process runs.
@@ -98,12 +119,14 @@ impl OperatorSet {
         Self::default()
     }
 
-    /// The operators of this crate: `subprocess`, `shell` and `http`.
+    /// The operators of this crate: `subprocess`, `shell`, `http` and
+    /// `object_exists`.
     pub fn builtin() -> Self {
         let mut set = Self::new();
         set.add("subprocess", Subprocess::default());
         set.add("shell", Shell::default());
         set.add("http", Http::default());
+        set.add("object_exists", ObjectExists::default());
         set
     }
 
@@ -245,15 +268,19 @@ mod tests {
     }
 
     #[test]
-    fn builtin_set_runs_the_three_operators() {
+    fn builtin_set_runs_the_four_operators() {
         let set = OperatorSet::builtin();
         assert_eq!(
             set.names().collect::<Vec<_>>(),
-            ["http", "shell", "subprocess"]
+            ["http", "object_exists", "shell", "subprocess"]
         );
-        for name in ["http", "shell", "subprocess"] {
+        for name in ["http", "object_exists", "shell", "subprocess"] {
             assert!(set.runs(name), "{name}");
         }
+        assert_eq!(
+            set.check("object_exists", &table(r#"url = "s3://landing/k""#)),
+            Ok(())
+        );
         assert_eq!(
             set.check("subprocess", &table(r#"argv = ["python", "x.py"]"#)),
             Ok(())
@@ -331,6 +358,8 @@ mod tests {
             identity,
             params,
             inputs,
+            state: None,
+            now_ms: 0,
         }
     }
 

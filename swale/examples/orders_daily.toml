@@ -38,9 +38,11 @@ timeout = "10m"
 [[node]]
 name = "partition_ready"
 produces = "orders_source_partition"
-operator = "shell"
+operator = "object_exists"
 [node.params]
-command = "aws s3api head-object --bucket landing --key orders/{{ partition }}.parquet >&2"
+url = "s3://landing/orders/{{ partition }}.parquet"
+interval = "5m"
+timeout = "6h"
 
 [[node]]
 name = "notify"

@@ -1,7 +1,8 @@
 //! The input of a task instance: the operator, the node's parameters before
 //! rendering and the records of its upstreams. The input is the run's payload,
 //! so a definition edit that changes a node's parameters while its run is
-//! active fails the resubmission with an input mismatch.
+//! active fails the resubmission with an input mismatch. The payload of a
+//! later step of the run is the input with the state of the previous step.
 
 use std::collections::BTreeMap;
 
@@ -24,6 +25,9 @@ pub struct TaskInput {
     pub inputs: BTreeMap<String, Value>,
     /// The status of each upstream node with a record.
     pub upstreams: BTreeMap<String, UpstreamSummary>,
+    /// The state of the previous step of the run. `None` on the first step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Value>,
 }
 
 /// The terminal status of an upstream node.
@@ -61,6 +65,7 @@ impl TaskInput {
             params,
             inputs,
             upstreams,
+            state: None,
         }
     }
 

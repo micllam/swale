@@ -92,6 +92,8 @@ mod tests {
             identity: &identity,
             params: &params,
             inputs: &inputs,
+            state: None,
+            now_ms: 0,
         };
         Shell::default()
             .run(
