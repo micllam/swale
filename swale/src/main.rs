@@ -90,8 +90,9 @@ enum Command {
         #[command(flatten)]
         request: RequestArgs,
     },
-    /// Asks the daemon on a store to run a node with a failed or cancelled
-    /// record again.
+    /// Asks the daemon on a store to run a node again. After a succeeded
+    /// node, the nodes downstream of it through an all-succeeded edge run
+    /// again with the new outputs.
     Rerun {
         /// The graph.
         graph: String,

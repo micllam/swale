@@ -49,6 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open the queue, and `--wait` prints the outcome. `Scheduler::start_runs`
   applies a start request. `Daemon::new` takes a `RequestStore`, and the
   crate depends on `ulid` for the request id.
+- A rerun of a succeeded node. `swale rerun` and `Scheduler::rerun` run the
+  node again and, after it, every node downstream of it through an
+  all-succeeded edge, and a task node with the all-done or one-failed rule
+  keeps its record. `GraphRunRecord::expected_reruns` lists the rerun count
+  each such node must reach, `GraphRunRecord::is_current` states whether a
+  record reached it, and the readiness rule reads the current records alone
+  (`readiness::current_records`, `readiness::rerun_scope`).
 
 ### Changed
 
@@ -77,11 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule when a node runs (`is_ready`, `node_states`) and when a graph run is
   finished (`settled_state`). Import it from `swale::readiness`.
 - **Breaking:** `scheduler::Error` has the variants `Definition`,
-  `UnknownGraph`, `NoPartition` and `ObjectStore`, and its `Record` variant
-  and that of `status::Error` contain a `RecordError`. Add a wildcard arm to
-  an exhaustive match. `Error::is_permanent` states whether a retry can
-  change the outcome, and a worker dead-letters a job with a permanent error
-  at once, a malformed record included.
+  `UnknownGraph`, `NoPartition`, `ObjectStore` and `Contended`, and its
+  `Record` variant and that of `status::Error` contain a `RecordError`. Add
+  a wildcard arm to an exhaustive match. `Error::is_permanent` states
+  whether a retry can change the outcome, and a worker dead-letters a job
+  with a permanent error at once, a malformed record included.
 - **Breaking:** `to_bytes` and `from_bytes` of every record and payload are
   the methods of the `JsonBytes` trait. Import `swale::JsonBytes` where they
   are called.

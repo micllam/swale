@@ -7,7 +7,9 @@
 //! store. Its view lags that process by the flush interval of the writer.
 //!
 //! The state of a node ([`NodeState`]) is derived from the records alone, by
-//! the readiness rule of [`crate::readiness`].
+//! the readiness rule of [`crate::readiness`]. A node whose record a rerun
+//! superseded has the state of a node without a record and keeps the record
+//! in its status.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -18,7 +20,7 @@ use taquba::{JobRecord, QueueReader, QueueStats, ReaderMode, ReaderOptions};
 
 use crate::definition_store::{DefinitionError, DefinitionStore};
 use crate::partition::Partition;
-use crate::readiness::{NodeState, node_states};
+use crate::readiness::{NodeState, current_records, node_states};
 use crate::records::{
     self, Entry, GRAPH_RUNS_PREFIX, GRAPHS_PREFIX, GraphRecord, GraphRunRecord, GraphRunState,
     NodeRecord, ReadError, RecordError, RequestRecord,
@@ -95,7 +97,7 @@ pub struct NodeStatus {
     pub pool: String,
     /// The state.
     pub state: NodeState,
-    /// The node record.
+    /// The node record, current or superseded by a rerun.
     pub record: Option<NodeRecord>,
 }
 
@@ -209,7 +211,7 @@ impl StatusReader {
                 node_records.insert(node.name().to_string(), node_record);
             }
         }
-        let states = node_states(&definition, &node_records);
+        let states = node_states(&definition, &current_records(&record, &node_records));
         let nodes = definition
             .nodes()
             .iter()

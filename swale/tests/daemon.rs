@@ -486,10 +486,22 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
         1
     );
 
+    // A rerun of the succeeded node is admitted at the next count.
+    requests.submit(&id(4), &rerun).await.unwrap();
+    let report = daemon.apply_requests().await.unwrap();
+    assert_eq!(
+        report.applied,
+        [(
+            id(4),
+            RequestOutcome::Rerun {
+                run_id: "orders-20260915-extract-r2".into()
+            }
+        )]
+    );
+
     // A refused request has its reason in the record. An object that is not
     // a request is removed without a record.
     let refused = [
-        (id(4), rerun.clone()),
         (
             id(5),
             Request::Rerun {
@@ -535,7 +547,6 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
     assert_eq!(
         reasons,
         [
-            "node `extract` succeeded",
             "graph `orders` does not have a node `nope`",
             "graph `nope` does not have an adopted definition",
             "graph `orders` does not have an active run for partition `20260901`",

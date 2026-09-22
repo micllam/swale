@@ -9,6 +9,7 @@
 //! - `swale/requests/{id}`: the [`RequestRecord`] of an applied request.
 
 use std::any::type_name;
+use std::collections::BTreeMap;
 use std::future::Future;
 
 use bytes::Bytes;
@@ -195,6 +196,21 @@ pub struct GraphRunRecord {
     pub requested_at_ms: u64,
     /// The state.
     pub state: GraphRunState,
+    /// The rerun count each listed node must reach for its record to be
+    /// current, by node name. A rerun of a succeeded node lists the node and
+    /// the nodes downstream of it through an all-succeeded edge, and the
+    /// settle of the run removes an entry that a record reached.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expected_reruns: BTreeMap<String, u32>,
+}
+
+impl GraphRunRecord {
+    /// Whether `record`, the record of `node`, is at or past the rerun
+    /// count the run expects of the node. A record below the count is
+    /// superseded by a rerun, and the readiness rule treats it as absent.
+    pub fn is_current(&self, node: &str, record: &NodeRecord) -> bool {
+        record.rerun >= self.expected_reruns.get(node).copied().unwrap_or(0)
+    }
 }
 
 /// The record of a graph the process adopted: the definition that a trigger
@@ -448,8 +464,18 @@ mod tests {
             definition: "abc".into(),
             requested_at_ms: 7,
             state: GraphRunState::Active,
+            expected_reruns: BTreeMap::new(),
+        };
+        let json = String::from_utf8(run.to_bytes()).unwrap();
+        assert!(!json.contains("expected_reruns"), "{json}");
+        assert_eq!(GraphRunRecord::from_bytes(json.as_bytes()).unwrap(), run);
+        let run = GraphRunRecord {
+            expected_reruns: BTreeMap::from([("transform".to_string(), 1)]),
+            ..run
         };
         assert_eq!(GraphRunRecord::from_bytes(&run.to_bytes()).unwrap(), run);
+        assert!(run.is_current("extract", &record));
+        assert!(!run.is_current("transform", &record));
         assert_eq!(
             RecordStatus::from(TerminalStatus::Cancelled),
             RecordStatus::Cancelled

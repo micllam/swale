@@ -124,12 +124,19 @@
 //! store, so they can run alongside a daemon.
 //!
 //! `swale start <graph> <partition>...` starts the graph run of each
-//! partition, `swale rerun <graph> <partition> <node>` runs a node with a
-//! failed or cancelled record again, and `swale cancel <graph> <partition>`
-//! cancels an active graph run. Each command writes a request to the store
-//! and does not open the queue, and the daemon applies the request at its
-//! next sync pass. With `--wait` the command waits for the outcome and prints
-//! it.
+//! partition, `swale rerun <graph> <partition> <node>` runs a node again, and
+//! `swale cancel <graph> <partition>` cancels an active graph run. Each
+//! command writes a request to the store and does not open the queue, and
+//! the daemon applies the request at its next sync pass. With `--wait` the
+//! command waits for the outcome and prints it.
+//!
+//! A rerun of a failed or cancelled node runs the node again, and its
+//! downstream nodes follow as their trigger rules allow. A rerun of a
+//! succeeded node runs the node again and, after it, every node downstream
+//! of it through an asset edge or an all-succeeded edge, each with the new
+//! outputs. A task node with the all-done or one-failed rule keeps its
+//! record. Until such a node runs again, the status view shows it as ready,
+//! waiting or blocked with its last record.
 //!
 //! ```console
 //! $ swale validate examples/orders_daily.toml

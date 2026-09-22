@@ -1,6 +1,7 @@
 //! Graph runs end to end on an in-memory store: the subprocess operator, the
 //! hook, the events worker and the reconciler.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -305,14 +306,71 @@ async fn a_dead_lettered_node_fails_the_run_blocks_its_downstream_and_a_rerun_re
         .await
         .unwrap();
     assert_eq!(load.run_id, "orders-20260915-load-r0");
-    // A rerun of a succeeded node is refused.
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_of_a_succeeded_node_runs_its_downstreams_again() {
+    let h = Harness::start(&definition_text(TRANSFORM_OK), true).await;
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+    h.wait_for_state(GraphRunState::Complete).await;
+
+    // The rerun of `extract` expects the next count of `extract`,
+    // `transform` and `load`. `notify` has the `all_done` rule and keeps
+    // its record.
+    let rerun = h
+        .scheduler
+        .rerun("orders", &Harness::partition(), "extract")
+        .await
+        .unwrap();
+    assert_eq!(rerun.unwrap().as_str(), "orders-20260915-extract-r1");
+    let run = h.wait_for_state(GraphRunState::Complete).await;
+    assert!(run.expected_reruns.is_empty(), "{run:?}");
+    for (key, run_id) in [
+        (
+            "swale/assets/orders_raw/20260915",
+            "orders-20260915-extract-r1",
+        ),
+        (
+            "swale/assets/orders_clean/20260915",
+            "orders-20260915-transform-r1",
+        ),
+        (
+            "swale/assets/orders_warehouse/20260915",
+            "orders-20260915-load-r1",
+        ),
+        (
+            "swale/tasks/orders/20260915/notify",
+            "orders-20260915-notify-r0",
+        ),
+    ] {
+        let record = h.record(key).await.unwrap();
+        assert_eq!(record.run_id, run_id);
+        assert_eq!(record.status, RecordStatus::Succeeded);
+    }
+
+    // A second rerun of the same node expects the count after the new
+    // records, and the run is active with the scope listed.
+    let rerun = h
+        .scheduler
+        .rerun("orders", &Harness::partition(), "transform")
+        .await
+        .unwrap();
+    assert_eq!(rerun.unwrap().as_str(), "orders-20260915-transform-r2");
+    let run = h.graph_run().await.unwrap();
+    assert_eq!(run.state, GraphRunState::Active);
     assert_eq!(
-        h.scheduler
-            .rerun("orders", &Harness::partition(), "extract")
-            .await
-            .unwrap(),
-        None
+        run.expected_reruns,
+        BTreeMap::from([("transform".to_string(), 2), ("load".to_string(), 2)])
     );
+    h.wait_for_state(GraphRunState::Complete).await;
+    let load = h
+        .record("swale/assets/orders_warehouse/20260915")
+        .await
+        .unwrap();
+    assert_eq!(load.run_id, "orders-20260915-load-r2");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -363,6 +421,7 @@ async fn the_reconciler_submits_ready_nodes_and_settles_the_run_without_events()
         definition: h.hash.clone(),
         requested_at_ms: 0,
         state: GraphRunState::Active,
+        expected_reruns: BTreeMap::new(),
     };
     h.queue.kv_put(&key, &run.to_bytes()).await.unwrap();
     h.write_record(

@@ -27,7 +27,10 @@
 //! graph runs, reruns a node or cancels a graph run, and its outcome is
 //! recorded at the request's key. The record of a rerun commits with the
 //! submit of the task instance, so a request applied a second time after a
-//! crash does not submit a second task instance.
+//! crash does not submit a second task instance. A rerun of a succeeded node
+//! writes the expected rerun count of the node and of its downstreams
+//! through an all-succeeded edge to the graph run record before the submit,
+//! so a crash between the two leaves a run that the reconciler completes.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -49,7 +52,9 @@ use crate::hook::{EVENTS_QUEUE, Event, RecordHook};
 use crate::input::TaskInput;
 use crate::operator::OperatorSet;
 use crate::partition::Partition;
-use crate::readiness::{NodeState, is_ready, node_states, settled_state};
+use crate::readiness::{
+    NodeState, current_records, is_ready, node_states, rerun_scope, settled_state,
+};
 use crate::records::JsonBytes;
 use crate::records::{
     self, Entry, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord, ReadError, RecordError,
@@ -115,6 +120,15 @@ pub enum Error {
         /// The node.
         node: String,
     },
+    /// The graph run record changed during the transition, which a retry
+    /// applies to the new record.
+    #[error("the run of graph `{graph}` for partition `{partition}` changed during the transition")]
+    Contended {
+        /// The graph.
+        graph: String,
+        /// The partition.
+        partition: Partition,
+    },
 }
 
 impl From<ReadError> for Error {
@@ -144,7 +158,8 @@ impl Error {
             Error::ObjectStore(_)
             | Error::Definition(_)
             | Error::UnknownDefinition(_)
-            | Error::UnknownPool { .. } => false,
+            | Error::UnknownPool { .. }
+            | Error::Contended { .. } => false,
         }
     }
 }
@@ -354,6 +369,7 @@ impl Scheduler {
             definition: hash.to_string(),
             requested_at_ms: self.clock.now_ms(),
             state: GraphRunState::Active,
+            expected_reruns: BTreeMap::new(),
         };
         let key = records::graph_run_key(graph.name(), partition);
         if !self
@@ -384,10 +400,12 @@ impl Scheduler {
         })
     }
 
-    /// Runs `node` again for `partition` after a failed or cancelled record,
-    /// at the next rerun count, when its upstreams satisfy its trigger rule.
-    /// The graph run returns to the active state. `None` when the node's
-    /// record is absent or succeeded, or when the node is not ready.
+    /// Runs `node` again for `partition` at the next rerun count, when its
+    /// upstreams satisfy its trigger rule. The graph run returns to the
+    /// active state. After a succeeded record, the graph run record expects
+    /// the next count of the node and of every node in its
+    /// [`rerun_scope`], so each runs again with the new outputs. `None` when
+    /// the node's record is absent, or when the node is not ready.
     pub async fn rerun(
         &self,
         graph_name: &str,
@@ -426,20 +444,33 @@ impl Scheduler {
         let Some(record) = records.get(node.name()) else {
             return Ok(Err(NotRerun::NoRecord));
         };
-        if record.status == RecordStatus::Succeeded {
-            return Ok(Err(NotRerun::Succeeded));
+        let mut active = GraphRunRecord {
+            state: GraphRunState::Active,
+            ..run.clone()
+        };
+        if record.status == RecordStatus::Succeeded && run.is_current(node.name(), record) {
+            for scoped in rerun_scope(&graph, node) {
+                if let Some(scoped_record) = records.get(scoped.name()) {
+                    active
+                        .expected_reruns
+                        .insert(scoped.name().to_string(), scoped_record.rerun + 1);
+                }
+            }
         }
-        if !is_ready(node, &records) {
+        let current = current_records(&active, &records);
+        if !is_ready(node, &current) {
             return Ok(Err(NotRerun::NotReady));
         }
-        if run.state != GraphRunState::Active {
-            let active = GraphRunRecord {
-                state: GraphRunState::Active,
-                ..run
-            };
-            self.queue
+        if active != run
+            && !self
+                .queue
                 .kv_compare_put(&key, Some(&bytes), &active.to_bytes())
-                .await?;
+                .await?
+        {
+            return Err(Error::Contended {
+                graph: graph_name.to_string(),
+                partition: partition.clone(),
+            });
         }
         let identity = identity(
             &graph,
@@ -449,7 +480,7 @@ impl Scheduler {
             record.rerun + 1,
         );
         let submitted = self
-            .submit_node(node, identity, &upstream_records(node, &records), kv_writes)
+            .submit_node(node, identity, &upstream_records(node, &current), kv_writes)
             .await?;
         Ok(Ok(submitted))
     }
@@ -548,7 +579,7 @@ impl Scheduler {
             return Ok(false);
         }
         let graph = self.graph(&run.definition).await?;
-        self.cancel_active_runs(&graph, partition).await?;
+        self.cancel_active_runs(&graph, partition, &run).await?;
         Ok(true)
     }
 
@@ -671,7 +702,7 @@ impl Scheduler {
                     }
                 }
                 GraphRunState::Cancelled => {
-                    report.cancelled += self.cancel_active_runs(&graph, &partition).await?;
+                    report.cancelled += self.cancel_active_runs(&graph, &partition, &run).await?;
                 }
                 GraphRunState::Complete | GraphRunState::Failed => {}
             }
@@ -785,9 +816,9 @@ impl Scheduler {
         Ok(records)
     }
 
-    /// Submits every ready node among `candidates` at rerun count 0, then
-    /// settles the active graph run. Returns the count of new submits and
-    /// whether the final state was written.
+    /// Submits every ready node among `candidates` at its next rerun count,
+    /// then settles the active graph run. Returns the count of new submits
+    /// and whether the final state was written.
     async fn advance<'a>(
         &self,
         graph: &Graph,
@@ -797,17 +828,19 @@ impl Scheduler {
         candidates: impl IntoIterator<Item = &'a Node>,
     ) -> Result<(usize, bool), Error> {
         let records = self.node_records(graph, partition).await?;
-        let states = node_states(graph, &records);
+        let current = current_records(run, &records);
+        let states = node_states(graph, &current);
         let mut submitted = 0;
         for node in candidates {
             if states[node.name()] != NodeState::Ready {
                 continue;
             }
+            let rerun = records.get(node.name()).map_or(0, |r| r.rerun + 1);
             let (_, new) = self
                 .submit_node(
                     node,
-                    identity(graph, &run.definition, partition, node, 0),
-                    &upstream_records(node, &records),
+                    identity(graph, &run.definition, partition, node, rerun),
+                    &upstream_records(node, &current),
                     |_| HashMap::new(),
                 )
                 .await?;
@@ -859,7 +892,8 @@ impl Scheduler {
 
     /// Writes the final state of the graph run when it is reached: the
     /// state of [`settled_state`], once no unrecorded task instance is
-    /// active. `true` when the state was written.
+    /// active. The write removes an expected rerun count that a record
+    /// reached. `true` when the state was written.
     async fn settle(
         &self,
         graph: &Graph,
@@ -875,16 +909,21 @@ impl Scheduler {
         // A blocked node can have an active run at count 0 from the time it
         // was ready, and a failed or cancelled node can have an active rerun.
         for node in graph.nodes() {
-            if let Some(run_id) = unrecorded_run_id(graph, partition, node, records)
+            if let Some(run_id) = unrecorded_run_id(graph, partition, run, node, records)
                 && self.run_is_active(node, &run_id).await?
             {
                 return Ok(false);
             }
         }
-        let settled = GraphRunRecord {
+        let mut settled = GraphRunRecord {
             state,
             ..run.clone()
         };
+        settled.expected_reruns.retain(|name, expected| {
+            records
+                .get(name)
+                .is_none_or(|record| record.rerun < *expected)
+        });
         let key = records::graph_run_key(graph.name(), partition);
         let written = self
             .queue
@@ -912,11 +951,12 @@ impl Scheduler {
         &self,
         graph: &Graph,
         partition: &Partition,
+        run: &GraphRunRecord,
     ) -> Result<usize, Error> {
         let records = self.node_records(graph, partition).await?;
         let mut cancelled = 0;
         for node in graph.nodes() {
-            let Some(run_id) = unrecorded_run_id(graph, partition, node, &records) else {
+            let Some(run_id) = unrecorded_run_id(graph, partition, run, node, &records) else {
                 continue;
             };
             let Some(runtime) = self.pools.runtime(node.pool()) else {
@@ -941,18 +981,23 @@ fn upstream_records(
         .collect()
 }
 
-/// The run id of the task instance of `node` that does not have a record.
-/// It is the run at count 0 of a node without a record, and the run at the
-/// next count after a failed or cancelled record. `None` after a succeeded
-/// record.
+/// The run id of the task instance of `node` that does not have a current
+/// record. It is the run at count 0 of a node without a record, and the run
+/// at the next count after a failed, cancelled or superseded record. `None`
+/// after a current succeeded record.
 fn unrecorded_run_id(
     graph: &Graph,
     partition: &Partition,
+    run: &GraphRunRecord,
     node: &Node,
     records: &BTreeMap<String, NodeRecord>,
 ) -> Option<RunId> {
     let rerun = match records.get(node.name()) {
-        Some(record) if record.status == RecordStatus::Succeeded => return None,
+        Some(record)
+            if record.status == RecordStatus::Succeeded && run.is_current(node.name(), record) =>
+        {
+            return None;
+        }
         Some(record) => record.rerun + 1,
         None => 0,
     };
@@ -982,8 +1027,6 @@ fn identity(
 enum NotRerun {
     /// The node does not have a record.
     NoRecord,
-    /// The record of the node is succeeded.
-    Succeeded,
     /// The records of the node's upstreams do not satisfy its trigger rule.
     NotReady,
 }
@@ -992,7 +1035,6 @@ impl std::fmt::Display for NotRerun {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             NotRerun::NoRecord => "does not have a record",
-            NotRerun::Succeeded => "succeeded",
             NotRerun::NotReady => "is not ready: its upstreams do not satisfy its trigger rule",
         })
     }

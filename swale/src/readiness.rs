@@ -1,20 +1,24 @@
 //! The readiness rule: when a node runs, and when a graph run is finished.
 //!
-//! The rule reads the node records of one graph run and nothing else. A node
-//! without a record is ready when the records of its upstreams satisfy its
-//! trigger rule ([`is_ready`]). It is waiting when a record that follows can
-//! satisfy the rule, and blocked otherwise ([`node_states`]). A graph run is
-//! finished when no node is ready or waiting ([`settled_state`]): complete
-//! when every node is succeeded, and failed otherwise. The scheduler applies
-//! the rule to submit and to settle, and the status view applies the same
-//! rule to derive the state of a node.
+//! The rule reads the graph run record and the node records of one graph run
+//! and nothing else. A record below the rerun count the graph run expects of
+//! its node is superseded by a rerun, and the rule reads the current records
+//! alone ([`current_records`]). A node without a current record is ready when
+//! the records of its upstreams satisfy its trigger rule ([`is_ready`]). It
+//! is waiting when a record that follows can satisfy the rule, and blocked
+//! otherwise ([`node_states`]). A graph run is finished when no node is ready
+//! or waiting ([`settled_state`]): complete when every node is succeeded, and
+//! failed otherwise. A rerun of a node reaches the nodes downstream of it
+//! through an all-succeeded edge ([`rerun_scope`]). The scheduler applies the
+//! rule to submit and to settle, and the status view applies the same rule
+//! to derive the state of a node.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
 use crate::graph::{Graph, Node, TriggerRule};
-use crate::records::{GraphRunState, NodeRecord, RecordStatus};
+use crate::records::{GraphRunRecord, GraphRunState, NodeRecord, RecordStatus};
 
 /// The state of a node in a graph run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -71,6 +75,45 @@ impl From<RecordStatus> for NodeState {
             RecordStatus::Cancelled => NodeState::Cancelled,
         }
     }
+}
+
+/// The records among `records`, by node name, that `run` treats as
+/// current: a record at or past the rerun count the run expects of its node.
+pub fn current_records(
+    run: &GraphRunRecord,
+    records: &BTreeMap<String, NodeRecord>,
+) -> BTreeMap<String, NodeRecord> {
+    records
+        .iter()
+        .filter(|(name, record)| run.is_current(name, record))
+        .map(|(name, record)| (name.clone(), record.clone()))
+        .collect()
+}
+
+/// The nodes a rerun of `node` runs again, in definition order: the node
+/// and every node downstream of it through a node with the all-succeeded
+/// rule. A task node with the all-done or one-failed rule keeps its record,
+/// and the nodes downstream of it are not reached through it.
+pub fn rerun_scope<'a>(graph: &'a Graph, node: &'a Node) -> Vec<&'a Node> {
+    let mut scope = BTreeSet::from([node.name()]);
+    let mut pending = vec![node];
+    while let Some(current) = pending.pop() {
+        for name in current.downstreams() {
+            let downstream = graph
+                .node(name)
+                .expect("a downstream name is a node of the graph");
+            if downstream.trigger_rule() == TriggerRule::AllSucceeded
+                && scope.insert(downstream.name())
+            {
+                pending.push(downstream);
+            }
+        }
+    }
+    graph
+        .nodes()
+        .iter()
+        .filter(|node| scope.contains(node.name()))
+        .collect()
 }
 
 /// Whether the records of a node's upstreams satisfy its trigger rule.
@@ -329,6 +372,48 @@ argv = ["true"]
             ])),
             [Failed, Succeeded, Succeeded, Failed, Ready]
         );
+    }
+
+    #[test]
+    fn a_superseded_record_reads_as_absent() {
+        use NodeState::*;
+        let graph = crate::load_str(DEFINITION, &OperatorSet::builtin()).unwrap();
+        let all_succeeded =
+            ["a", "b", "on_failure", "join", "report"].map(|name| (name, RecordStatus::Succeeded));
+        let records = self::records(&all_succeeded);
+        let run = GraphRunRecord {
+            definition: "abc".into(),
+            requested_at_ms: 0,
+            state: GraphRunState::Active,
+            expected_reruns: BTreeMap::from([("b".to_string(), 1), ("join".to_string(), 1)]),
+        };
+        let current = current_records(&run, &records);
+        assert_eq!(
+            current.keys().collect::<Vec<_>>(),
+            ["a", "on_failure", "report"]
+        );
+        assert_eq!(
+            in_order(&node_states(&graph, &current)),
+            [Succeeded, Ready, Succeeded, Waiting, Succeeded]
+        );
+        assert_eq!(settled_state(&node_states(&graph, &current)), None);
+    }
+
+    #[test]
+    fn a_rerun_reaches_the_downstreams_through_all_succeeded_edges() {
+        let graph = crate::load_str(DEFINITION, &OperatorSet::builtin()).unwrap();
+        let scope = |name: &str| -> Vec<&str> {
+            rerun_scope(&graph, graph.node(name).unwrap())
+                .iter()
+                .map(|node| node.name())
+                .collect()
+        };
+        // `on_failure` and `report` keep their records, and `join` is
+        // reached through `b`.
+        assert_eq!(scope("a"), ["a", "b", "join"]);
+        assert_eq!(scope("b"), ["b", "join"]);
+        assert_eq!(scope("on_failure"), ["on_failure", "join"]);
+        assert_eq!(scope("report"), ["report"]);
     }
 
     #[test]
