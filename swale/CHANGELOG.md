@@ -80,6 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `Template::segments` and `template::Segment` are private.
   `Template::upstream_nodes` and `Template::render` are the public
   operations.
+- **Breaking:** `Pools`, `PoolsBuilder` and `PoolRuntime` moved from
+  `scheduler` to the `pools` module. The root re-export `swale::Pools` is
+  unchanged.
 - **Breaking:** `is_ready` moved to the `readiness` module, which has the
   rule when a node runs (`is_ready`, `node_states`) and when a graph run is
   finished (`settled_state`). Import it from `swale::readiness`.

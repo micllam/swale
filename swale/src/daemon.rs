@@ -42,10 +42,11 @@ use taquba_cron::{Backfill, BackfillStart, CronScheduler, Schedule, ScheduleHand
 use tokio_util::sync::CancellationToken;
 
 use crate::graph::Graph;
+use crate::pools::Pools;
 use crate::records::JsonBytes;
 use crate::records::{self, GraphRecord, RequestOutcome, RequestRecord};
 use crate::request::{Request, RequestId, RequestStore};
-use crate::scheduler::{Error, Pools, Scheduler, SchedulerOptions, TRIGGERS_QUEUE, firing_headers};
+use crate::scheduler::{Error, Scheduler, SchedulerOptions, TRIGGERS_QUEUE, firing_headers};
 
 /// The settings of [`Daemon::run`].
 #[derive(Debug, Clone)]

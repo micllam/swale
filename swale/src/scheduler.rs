@@ -1,11 +1,12 @@
 //! The scheduler: it starts graph runs, submits a node when its upstreams
 //! satisfy its trigger rule, and settles the state of a graph run.
 //!
-//! Every task instance runs on the [`WorkflowRuntime`] of its pool
-//! ([`Pools`]). The terminal hook of each pool writes the node's record and
-//! enqueues an [`Event`], and the [`Scheduler`] is the [`Worker`] of the
-//! events queue. Every submit is idempotent on the deterministic run id, so a
-//! redelivered event and a repeated reconciler pass are harmless.
+//! Every task instance runs on the runtime of its pool ([`Pools`]). The
+//! terminal hook of each pool writes the node's record and enqueues an
+//! [`Event`], and the [`Scheduler`] is the [`Worker`] of the events queue.
+//! Every submit is idempotent on the deterministic run id, so a redelivered
+//! event and a repeated reconciler pass do not submit a second task
+//! instance.
 //!
 //! A job on the triggers queue ([`TRIGGERS_QUEUE`]) is a cron firing without
 //! a payload: the `swale.graph` header identifies the graph, and the
@@ -23,45 +24,39 @@
 //! cancelled graph run. A lost event delays a graph run by one reconciler
 //! interval at most.
 //!
-//! A [`Request`] from another process ([`Scheduler::handle_request`]) starts
-//! graph runs, reruns a node or cancels a graph run, and its outcome is
-//! recorded at the request's key. The record of a rerun commits with the
-//! submit of the task instance, so a request applied a second time after a
-//! crash does not submit a second task instance. A rerun of a succeeded node
-//! writes the expected rerun count of the node and of its downstreams
-//! through an all-succeeded edge to the graph run record before the submit,
-//! so a crash between the two leaves a run that the reconciler completes.
+//! A request from another process ([`Scheduler::handle_request`], in the
+//! [`crate::request`] module) starts graph runs, reruns a node or cancels a
+//! graph run. A rerun of a succeeded node writes the expected rerun count of
+//! the node and its downstreams to the graph run record before the submit.
+//! A crash between the two writes leaves a run that the reconciler
+//! completes.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use taquba::object_store::ObjectStore;
 use taquba::{
     Clock, JobRecord, LeaseHandle, PermanentFailure, Queue, Worker, WorkerError, WorkerHandle,
 };
 use taquba_cron::PREVIOUS_FIRE_MS_HEADER;
-use taquba_workflow::{RunId, RunOptions, RunSpec, RunState, RunnerHandle, WorkflowRuntime};
+use taquba_workflow::{RunId, RunOptions, RunSpec, RunState};
 use tokio_util::sync::CancellationToken;
 
 use crate::definition_store::{DefinitionError, DefinitionStore};
-use crate::dispatch::Dispatch;
 use crate::graph::{Graph, Node};
-use crate::hook::{EVENTS_QUEUE, Event, RecordHook};
+use crate::hook::{EVENTS_QUEUE, Event};
 use crate::input::TaskInput;
-use crate::operator::OperatorSet;
 use crate::partition::Partition;
+use crate::pools::Pools;
 use crate::readiness::{
     NodeState, current_records, is_ready, node_states, rerun_scope, settled_state,
 };
 use crate::records::JsonBytes;
 use crate::records::{
     self, Entry, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord, ReadError, RecordError,
-    RecordStatus, RequestOutcome, RequestRecord,
+    RecordStatus,
 };
-use crate::request::{Request, RequestId};
-use crate::store::store_path;
 use crate::task::{self, HEADER_GRAPH, TaskIdentity};
 
 /// The queue of the triggers.
@@ -164,120 +159,6 @@ impl Error {
     }
 }
 
-/// The runtime of a pool.
-pub type PoolRuntime = WorkflowRuntime<Dispatch, RecordHook>;
-
-/// One [`WorkflowRuntime`] per pool, all over one queue and one store.
-pub struct Pools {
-    runtimes: HashMap<String, PoolRuntime>,
-}
-
-/// Builds a [`Pools`].
-pub struct PoolsBuilder {
-    queue: Arc<Queue>,
-    store: Arc<dyn ObjectStore>,
-    dispatch: Dispatch,
-    hook: RecordHook,
-    poll_interval: Duration,
-    memo_retention: Duration,
-    store_prefix: String,
-    pools: Vec<(String, usize)>,
-}
-
-impl PoolsBuilder {
-    /// Adds the pool `name` with `max_concurrent_steps` steps at a time. Its
-    /// queue is `swale-pool-{name}`, and its memos are at
-    /// `swale-memo-{name}` within the store prefix.
-    pub fn pool(mut self, name: impl Into<String>, max_concurrent_steps: usize) -> Self {
-        self.pools.push((name.into(), max_concurrent_steps));
-        self
-    }
-
-    /// The poll interval of every pool's step worker.
-    pub fn poll_interval(mut self, interval: Duration) -> Self {
-        self.poll_interval = interval;
-        self
-    }
-
-    /// The time the memos and the run result record of a terminated task
-    /// instance are kept, seven days by default. The scheduler does not read
-    /// them, so the window serves diagnosis alone.
-    pub fn memo_retention(mut self, retention: Duration) -> Self {
-        self.memo_retention = retention;
-        self
-    }
-
-    /// The path within the store that every pool writes its memos under,
-    /// for a store whose queue is opened at a prefix. Empty by default.
-    pub fn store_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.store_prefix = prefix.into();
-        self
-    }
-
-    /// Builds the runtimes.
-    pub fn build(self) -> Pools {
-        let runtimes = self
-            .pools
-            .into_iter()
-            .map(|(name, concurrency)| {
-                let runtime = WorkflowRuntime::builder(
-                    self.queue.clone(),
-                    self.store.clone(),
-                    self.dispatch.clone(),
-                    self.hook.clone(),
-                )
-                .queue_name(format!("swale-pool-{name}"))
-                .memo_prefix(store_path(
-                    &self.store_prefix,
-                    &format!("swale-memo-{name}"),
-                ))
-                .max_concurrent_steps(concurrency)
-                .poll_interval(self.poll_interval)
-                .memo_retention(self.memo_retention)
-                .build();
-                (name, runtime)
-            })
-            .collect();
-        Pools { runtimes }
-    }
-}
-
-impl Pools {
-    /// Starts building pools over `queue` and `store`, with `operators` as
-    /// the dispatch and `hook` as the terminal hook of every pool.
-    pub fn builder(
-        queue: Arc<Queue>,
-        store: Arc<dyn ObjectStore>,
-        operators: Arc<OperatorSet>,
-        hook: RecordHook,
-    ) -> PoolsBuilder {
-        PoolsBuilder {
-            queue,
-            store,
-            dispatch: Dispatch::new(operators),
-            hook,
-            poll_interval: Duration::from_millis(250),
-            memo_retention: Duration::from_secs(7 * 86_400),
-            store_prefix: String::new(),
-            pools: Vec::new(),
-        }
-    }
-
-    /// The runtime of the pool `name`.
-    pub fn runtime(&self, name: &str) -> Option<&PoolRuntime> {
-        self.runtimes.get(name)
-    }
-
-    /// Spawns the step worker of every pool. Each stops when `shutdown` is
-    /// cancelled.
-    pub fn spawn(&self, shutdown: &CancellationToken) -> Vec<RunnerHandle> {
-        self.runtimes
-            .values()
-            .map(|runtime| runtime.spawn(shutdown.clone().cancelled_owned()))
-            .collect()
-    }
-}
-
 /// The settings of [`Scheduler::run`].
 #[derive(Debug, Clone)]
 pub struct SchedulerOptions {
@@ -325,10 +206,10 @@ pub struct ReconcileReport {
 
 /// The scheduler.
 pub struct Scheduler {
-    queue: Arc<Queue>,
+    pub(crate) queue: Arc<Queue>,
     definitions: Arc<DefinitionStore>,
     pools: Arc<Pools>,
-    clock: Arc<dyn Clock>,
+    pub(crate) clock: Arc<dyn Clock>,
 }
 
 impl Scheduler {
@@ -421,7 +302,7 @@ impl Scheduler {
     /// [`Self::rerun`] with the KV writes of `kv_writes`, given the run id,
     /// committed with the submit. Returns the run id and whether the submit
     /// was new, or the reason the node was not rerun.
-    async fn rerun_with(
+    pub(crate) async fn rerun_with(
         &self,
         graph_name: &str,
         partition: &Partition,
@@ -483,77 +364,6 @@ impl Scheduler {
             .submit_node(node, identity, &upstream_records(node, &current), kv_writes)
             .await?;
         Ok(Ok(submitted))
-    }
-
-    /// Applies the request `id` and writes its record at the request's
-    /// key. A request that refers to an absent graph, graph run or node, or
-    /// that the state of the graph run does not admit, is refused in the
-    /// record. A failure of the store is returned, and the record is not
-    /// written.
-    pub async fn handle_request(
-        &self,
-        id: &RequestId,
-        request: &Request,
-    ) -> Result<RequestRecord, Error> {
-        let key = records::request_key(id);
-        let handled_at_ms = self.clock.now_ms();
-        let record = |outcome| RequestRecord {
-            request: request.clone(),
-            handled_at_ms,
-            outcome,
-        };
-        let outcome = match request {
-            Request::Start { graph, partitions } => {
-                match self.start_runs(graph, partitions).await {
-                    Ok(partitions) => RequestOutcome::Started { partitions },
-                    Err(e) => RequestOutcome::Refused {
-                        reason: refusal(e)?,
-                    },
-                }
-            }
-            Request::Rerun {
-                graph,
-                partition,
-                node,
-            } => {
-                let rerun_record = |run_id: &RunId| {
-                    record(RequestOutcome::Rerun {
-                        run_id: run_id.to_string(),
-                    })
-                };
-                let submitted = self
-                    .rerun_with(graph, partition, node, |run_id| {
-                        HashMap::from([(key.clone(), rerun_record(run_id).to_bytes())])
-                    })
-                    .await;
-                match submitted {
-                    Ok(Ok((run_id, true))) => return Ok(rerun_record(&run_id)),
-                    Ok(Ok((run_id, false))) => RequestOutcome::Refused {
-                        reason: format!("the rerun `{run_id}` is active"),
-                    },
-                    Ok(Err(reason)) => RequestOutcome::Refused {
-                        reason: format!("node `{node}` {reason}"),
-                    },
-                    Err(e) => RequestOutcome::Refused {
-                        reason: refusal(e)?,
-                    },
-                }
-            }
-            Request::Cancel { graph, partition } => {
-                if self.cancel_run(graph, partition).await? {
-                    RequestOutcome::Cancelled
-                } else {
-                    RequestOutcome::Refused {
-                        reason: format!(
-                            "graph `{graph}` does not have an active run for partition `{partition}`"
-                        ),
-                    }
-                }
-            }
-        };
-        let record = record(outcome);
-        self.queue.kv_put(&key, &record.to_bytes()).await?;
-        Ok(record)
     }
 
     /// Cancels the graph run: writes the cancelled state and cancels every
@@ -1024,7 +834,7 @@ fn identity(
 
 /// Why a rerun did not submit a task instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NotRerun {
+pub(crate) enum NotRerun {
     /// The node does not have a record.
     NoRecord,
     /// The records of the node's upstreams do not satisfy its trigger rule.
@@ -1037,16 +847,6 @@ impl std::fmt::Display for NotRerun {
             NotRerun::NoRecord => "does not have a record",
             NotRerun::NotReady => "is not ready: its upstreams do not satisfy its trigger rule",
         })
-    }
-}
-
-/// The reason a request is refused for `error`, or the error when it is a
-/// failure of the store, which the caller retries.
-fn refusal(error: Error) -> Result<String, Error> {
-    if error.is_permanent() {
-        Ok(error.to_string())
-    } else {
-        Err(error)
     }
 }
 

@@ -4,10 +4,16 @@
 //! A command writes a [`Request`] as the object `{store prefix}/requests/{id}`
 //! and never opens the queue. The daemon reads the objects at every sync
 //! pass, applies each request in id order, records the outcome as the
-//! [`RequestRecord`](crate::records::RequestRecord) at the KV key
-//! `swale/requests/{id}` and removes the object. A request is applied once:
-//! a pass that finds the record of an object only removes the object.
+//! [`RequestRecord`] at the KV key `swale/requests/{id}` and removes the
+//! object. A request is applied once: a pass that finds the record of an
+//! object only removes the object.
+//!
+//! The daemon applies a request through [`Scheduler::handle_request`]. The
+//! record of a rerun commits with the submit of the task instance. A request
+//! applied a second time after a crash therefore does not submit a second
+//! task instance.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -16,9 +22,12 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{self, ObjectStore};
+use taquba_workflow::RunId;
 
 use crate::partition::Partition;
 use crate::records::JsonBytes;
+use crate::records::{self, RequestOutcome, RequestRecord};
+use crate::scheduler::{Error, Scheduler};
 use crate::store::ObjectPrefix;
 
 /// Maximum length of a request id in bytes.
@@ -164,6 +173,89 @@ impl RequestStore {
 
     fn path(&self, id: &RequestId) -> ObjectPath {
         self.objects.path(id.as_str())
+    }
+}
+
+impl Scheduler {
+    /// Applies the request `id` and writes its record at the request's
+    /// key. A request that refers to an absent graph, graph run or node, or
+    /// that the state of the graph run does not admit, is refused in the
+    /// record. A failure of the store is returned, and the record is not
+    /// written.
+    pub async fn handle_request(
+        &self,
+        id: &RequestId,
+        request: &Request,
+    ) -> Result<RequestRecord, Error> {
+        let key = records::request_key(id);
+        let handled_at_ms = self.clock.now_ms();
+        let record = |outcome| RequestRecord {
+            request: request.clone(),
+            handled_at_ms,
+            outcome,
+        };
+        let outcome = match request {
+            Request::Start { graph, partitions } => {
+                match self.start_runs(graph, partitions).await {
+                    Ok(partitions) => RequestOutcome::Started { partitions },
+                    Err(e) => RequestOutcome::Refused {
+                        reason: refusal(e)?,
+                    },
+                }
+            }
+            Request::Rerun {
+                graph,
+                partition,
+                node,
+            } => {
+                let rerun_record = |run_id: &RunId| {
+                    record(RequestOutcome::Rerun {
+                        run_id: run_id.to_string(),
+                    })
+                };
+                let submitted = self
+                    .rerun_with(graph, partition, node, |run_id| {
+                        HashMap::from([(key.clone(), rerun_record(run_id).to_bytes())])
+                    })
+                    .await;
+                match submitted {
+                    Ok(Ok((run_id, true))) => return Ok(rerun_record(&run_id)),
+                    Ok(Ok((run_id, false))) => RequestOutcome::Refused {
+                        reason: format!("the rerun `{run_id}` is active"),
+                    },
+                    Ok(Err(reason)) => RequestOutcome::Refused {
+                        reason: format!("node `{node}` {reason}"),
+                    },
+                    Err(e) => RequestOutcome::Refused {
+                        reason: refusal(e)?,
+                    },
+                }
+            }
+            Request::Cancel { graph, partition } => {
+                if self.cancel_run(graph, partition).await? {
+                    RequestOutcome::Cancelled
+                } else {
+                    RequestOutcome::Refused {
+                        reason: format!(
+                            "graph `{graph}` does not have an active run for partition `{partition}`"
+                        ),
+                    }
+                }
+            }
+        };
+        let record = record(outcome);
+        self.queue.kv_put(&key, &record.to_bytes()).await?;
+        Ok(record)
+    }
+}
+
+/// The reason a request is refused for `error`, or the error when it is a
+/// failure of the store, which the caller retries.
+fn refusal(error: Error) -> Result<String, Error> {
+    if error.is_permanent() {
+        Ok(error.to_string())
+    } else {
+        Err(error)
     }
 }
 
