@@ -101,6 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are called.
 - **Breaking:** `RecordHook::new` takes the clock alone, and the hook
   enqueues on `EVENTS_QUEUE`. `Pools::names` is removed.
+- **Breaking:** the memos of a pool are at `memos/{pool}` within the store
+  prefix, as the definitions and the requests are at `definitions/` and
+  `requests/`. 0.1.0 wrote them at `swale-memo-{pool}` next to the queue.
+  Remove the objects at that path of an existing store: the daemon does not
+  read them.
 - Every pool keeps the memos and the run result record of a terminated task
   instance for `PoolsBuilder::memo_retention`, seven days by default. 0.1.0
   kept them without a bound.

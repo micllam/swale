@@ -104,12 +104,12 @@ async fn run_command_completes_and_resumes_on_the_url_and_every_object_is_within
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("local/none: run exists"), "{stdout}");
 
-    // The definitions, the queue and the memos of the pool are within the
-    // prefix of the URL.
+    // The definitions, the memos and the queue are within the prefix of the
+    // URL.
     let (store, prefix) = open(&url);
     assert_eq!(
         children(&store, Some(&prefix)).await,
-        ["definitions", "swale", "swale-memo-default"]
+        ["definitions", "memos", "swale"]
     );
     // Every object that the tests of this file write is within the base
     // URL. The root of a `file` URL is the root of the file system, which

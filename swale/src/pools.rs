@@ -2,10 +2,10 @@
 //! store.
 //!
 //! Every task instance runs on the runtime of its node's pool. The queue of
-//! the pool `name` is `swale-pool-{name}`, and its memos are at
-//! `swale-memo-{name}` within the store prefix. The terminal hook of each
-//! runtime is the [`RecordHook`], which writes the node's record and
-//! enqueues the event for the scheduler.
+//! the pool `name` is `swale-pool-{name}`, and its memos are at `memos/{name}`
+//! within the store prefix. The terminal hook of each runtime is the
+//! [`RecordHook`], which writes the node's record and enqueues the event for
+//! the scheduler.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,7 +43,7 @@ pub struct PoolsBuilder {
 
 impl PoolsBuilder {
     /// Adds the pool `name` with `max_concurrent_steps` steps at a time. Its
-    /// queue is `swale-pool-{name}`, and its memos are at `swale-memo-{name}`
+    /// queue is `swale-pool-{name}`, and its memos are at `memos/{name}`
     /// within the store prefix.
     pub fn pool(mut self, name: impl Into<String>, max_concurrent_steps: usize) -> Self {
         self.pools.push((name.into(), max_concurrent_steps));
@@ -85,10 +85,7 @@ impl PoolsBuilder {
                     self.hook.clone(),
                 )
                 .queue_name(format!("swale-pool-{name}"))
-                .memo_prefix(store_path(
-                    &self.store_prefix,
-                    &format!("swale-memo-{name}"),
-                ))
+                .memo_prefix(store_path(&self.store_prefix, &format!("memos/{name}")))
                 .max_concurrent_steps(concurrency)
                 .poll_interval(self.poll_interval)
                 .memo_retention(self.memo_retention)
