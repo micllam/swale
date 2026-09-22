@@ -20,9 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Partition::of_time`, which gives the partition that contains a time, or
   `None` beyond the year 9999. The partition of a firing contains the start
   of the schedule interval that ends at the firing time.
-- The `Trigger` payload, the `swale-triggers` queue and
-  `Scheduler::handle_trigger`, which start the graph runs of a firing or of a
-  list of partitions.
+- The `swale-triggers` queue and `Scheduler::handle_trigger`: a cron firing
+  is a job with the graph in its `swale.graph` header and without a payload,
+  and the handler starts the graph run of the partition of the firing.
 - The graph record at `swale/graphs/{graph}`, which records the adopted
   definition of a graph.
 - The default store of every command, `~/.swale/store`.
@@ -46,8 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Request` type, which write a request object to the store for the daemon,
   and the request record at `swale/requests/{id}`, which the daemon writes
   with the outcome and `StatusReader::request` reads. The commands do not
-  open the queue, and `--wait` prints the outcome. `Daemon::new` takes a
-  `RequestStore`, and the crate depends on `ulid` for the request id.
+  open the queue, and `--wait` prints the outcome. `Scheduler::start_runs`
+  applies a start request. `Daemon::new` takes a `RequestStore`, and the
+  crate depends on `ulid` for the request id.
 
 ### Changed
 

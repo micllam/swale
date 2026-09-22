@@ -178,7 +178,6 @@ pub mod status;
 pub mod store;
 pub mod task;
 pub mod template;
-pub mod trigger;
 
 pub use daemon::{Daemon, DaemonOptions, RequestReport};
 pub use definition::{load_path, load_str};
@@ -194,8 +193,7 @@ pub use records::{
     RequestOutcome, RequestRecord,
 };
 pub use request::{Request, RequestId, RequestStore};
-pub use scheduler::{Pools, Scheduler, SchedulerOptions, StartOutcome};
+pub use scheduler::{Pools, Scheduler, SchedulerOptions, StartOutcome, TRIGGERS_QUEUE};
 pub use status::{GraphRunStatus, GraphStatus, NodeStatus, RunCounts, RunSummary, StatusReader};
 pub use task::TaskIdentity;
 pub use template::Template;
-pub use trigger::{TRIGGERS_QUEUE, Trigger};

@@ -7,11 +7,13 @@
 //! events queue. Every submit is idempotent on the deterministic run id, so a
 //! redelivered event and a repeated reconciler pass are harmless.
 //!
-//! A [`Trigger`] on the triggers queue starts graph runs of the graph's
-//! adopted definition ([`Scheduler::handle_trigger`]). A cron firing starts
-//! the run of one partition: the partition that contains the start of the
-//! schedule interval that the firing ends. A target request starts the run
-//! of every partition it lists.
+//! A job on the triggers queue ([`TRIGGERS_QUEUE`]) is a cron firing without
+//! a payload: the `swale.graph` header identifies the graph, and the
+//! `cron.previous_fire_ms` header, the start of the schedule interval that
+//! the firing ends, determines the partition. The [`TriggerWorker`] reads
+//! both, and [`Scheduler::handle_trigger`] starts the graph run of the
+//! graph's adopted definition for that partition. A start request starts the
+//! run of every partition it lists ([`Scheduler::start_runs`]).
 //!
 //! The events worker submits the ready downstreams of a terminated task
 //! instance, and the reconciler ([`Scheduler::reconcile`]) submits every
@@ -36,6 +38,7 @@ use taquba::object_store::ObjectStore;
 use taquba::{
     Clock, JobRecord, LeaseHandle, PermanentFailure, Queue, Worker, WorkerError, WorkerHandle,
 };
+use taquba_cron::PREVIOUS_FIRE_MS_HEADER;
 use taquba_workflow::{RunId, RunOptions, RunSpec, RunState, RunnerHandle, WorkflowRuntime};
 use tokio_util::sync::CancellationToken;
 
@@ -54,8 +57,10 @@ use crate::records::{
 };
 use crate::request::{Request, RequestId};
 use crate::store::store_path;
-use crate::task::{self, TaskIdentity};
-use crate::trigger::{TRIGGERS_QUEUE, Trigger, TriggerWorker};
+use crate::task::{self, HEADER_GRAPH, TaskIdentity};
+
+/// The queue of the triggers.
+pub const TRIGGERS_QUEUE: &str = "swale-triggers";
 
 /// A failure of the scheduler.
 #[derive(Debug, thiserror::Error)]
@@ -468,11 +473,7 @@ impl Scheduler {
         };
         let outcome = match request {
             Request::Start { graph, partitions } => {
-                let trigger = Trigger {
-                    graph: graph.clone(),
-                    partitions: partitions.clone(),
-                };
-                match self.handle_trigger(&trigger, None).await {
+                match self.start_runs(graph, partitions).await {
                     Ok(partitions) => RequestOutcome::Started { partitions },
                     Err(e) => RequestOutcome::Refused {
                         reason: refusal(e)?,
@@ -551,38 +552,55 @@ impl Scheduler {
         Ok(true)
     }
 
-    /// Handles one trigger: starts the graph run of the graph's adopted
-    /// definition for every partition of the trigger. A trigger without a
-    /// partition is a cron firing, and `interval_start_ms` is the occurrence
-    /// of the schedule before the firing time. A partition with a graph run
-    /// is unchanged. Returns the partitions whose graph run the call started.
+    /// Handles a cron firing of `graph_name`: starts the graph run of the
+    /// graph's adopted definition for the partition that contains
+    /// `interval_start_ms`, the occurrence of the schedule before the firing
+    /// time. Returns the partition, or `None` when its graph run existed.
     pub async fn handle_trigger(
         &self,
-        trigger: &Trigger,
+        graph_name: &str,
         interval_start_ms: Option<u64>,
+    ) -> Result<Option<Partition>, Error> {
+        let record = self.adopted(graph_name).await?;
+        let graph = self.graph(&record.definition).await?;
+        let partition = interval_start_ms
+            .and_then(|ms| Partition::of_time(graph.partitioning(), ms))
+            .ok_or_else(|| Error::NoPartition(graph_name.to_string()))?;
+        let started = self
+            .start_adopted(graph_name, &record, std::slice::from_ref(&partition))
+            .await?;
+        Ok(started.into_iter().next())
+    }
+
+    /// Starts the graph run of the adopted definition of `graph_name` for
+    /// every partition of `partitions`. A partition with a graph run is
+    /// unchanged. Returns the partitions whose graph run the call started.
+    pub async fn start_runs(
+        &self,
+        graph_name: &str,
+        partitions: &[Partition],
     ) -> Result<Vec<Partition>, Error> {
-        let record = self
-            .graph_record(&trigger.graph)
+        let record = self.adopted(graph_name).await?;
+        self.start_adopted(graph_name, &record, partitions).await
+    }
+
+    async fn adopted(&self, graph_name: &str) -> Result<GraphRecord, Error> {
+        self.graph_record(graph_name)
             .await?
-            .ok_or_else(|| Error::UnknownGraph(trigger.graph.clone()))?;
-        let partitions = if trigger.partitions.is_empty() {
-            let graph = self.graph(&record.definition).await?;
-            let partition = interval_start_ms
-                .and_then(|ms| Partition::of_time(graph.partitioning(), ms))
-                .ok_or_else(|| Error::NoPartition(trigger.graph.clone()))?;
-            vec![partition]
-        } else {
-            trigger.partitions.clone()
-        };
+            .ok_or_else(|| Error::UnknownGraph(graph_name.to_string()))
+    }
+
+    async fn start_adopted(
+        &self,
+        graph_name: &str,
+        record: &GraphRecord,
+        partitions: &[Partition],
+    ) -> Result<Vec<Partition>, Error> {
         let mut started = Vec::new();
         for partition in partitions {
-            if self
-                .start_run(&record.definition, &partition)
-                .await?
-                .started
-            {
-                tracing::info!(graph = %trigger.graph, %partition, "graph run started");
-                started.push(partition);
+            if self.start_run(&record.definition, partition).await?.started {
+                tracing::info!(graph = %graph_name, %partition, "graph run started");
+                started.push(partition.clone());
             }
         }
         Ok(started)
@@ -992,11 +1010,46 @@ fn refusal(error: Error) -> Result<String, Error> {
 
 /// The failure of a worker for `error`: permanent when the error is, and
 /// retried otherwise.
-pub(crate) fn worker_error(error: Error) -> WorkerError {
+fn worker_error(error: Error) -> WorkerError {
     if error.is_permanent() {
         PermanentFailure::new(error.to_string()).into()
     } else {
         Box::new(error)
+    }
+}
+
+/// The headers of the cron schedule of `graph`, which every firing of the
+/// schedule includes.
+pub fn firing_headers(graph: &str) -> HashMap<String, String> {
+    HashMap::from([(HEADER_GRAPH.to_string(), graph.to_string())])
+}
+
+/// The [`Worker`] of the triggers queue.
+pub struct TriggerWorker {
+    scheduler: Arc<Scheduler>,
+}
+
+impl TriggerWorker {
+    /// A worker that starts graph runs on `scheduler`.
+    pub fn new(scheduler: Arc<Scheduler>) -> Self {
+        TriggerWorker { scheduler }
+    }
+}
+
+impl Worker for TriggerWorker {
+    async fn process(&self, job: &JobRecord, _lease: &LeaseHandle) -> Result<(), WorkerError> {
+        let graph = job.headers.get(HEADER_GRAPH).ok_or_else(|| {
+            PermanentFailure::new(format!("the job does not have the `{HEADER_GRAPH}` header"))
+        })?;
+        let interval_start_ms = job
+            .headers
+            .get(PREVIOUS_FIRE_MS_HEADER)
+            .and_then(|value| value.parse().ok());
+        self.scheduler
+            .handle_trigger(graph, interval_start_ms)
+            .await
+            .map(|_| ())
+            .map_err(worker_error)
     }
 }
 

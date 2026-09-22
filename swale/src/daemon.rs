@@ -45,8 +45,7 @@ use crate::graph::Graph;
 use crate::records::JsonBytes;
 use crate::records::{self, GraphRecord, RequestOutcome, RequestRecord};
 use crate::request::{Request, RequestId, RequestStore};
-use crate::scheduler::{Error, Pools, Scheduler, SchedulerOptions};
-use crate::trigger::{TRIGGERS_QUEUE, Trigger};
+use crate::scheduler::{Error, Pools, Scheduler, SchedulerOptions, TRIGGERS_QUEUE, firing_headers};
 
 /// The settings of [`Daemon::run`].
 #[derive(Debug, Clone)]
@@ -339,8 +338,9 @@ fn log_outcome(id: &RequestId, record: &RequestRecord) {
     }
 }
 
-/// The cron schedule of a graph with a `schedule`: a trigger without a
-/// partition on the triggers queue, with the catch-up window as the backfill.
+/// The cron schedule of a graph with a `schedule`: a firing on the triggers
+/// queue with the graph in its headers, with the catch-up window as the
+/// backfill.
 fn schedule_of(graph: &Graph) -> Option<Schedule> {
     let backfill = graph.catchup().map(|lookback| Backfill {
         lookback,
@@ -351,8 +351,9 @@ fn schedule_of(graph: &Graph) -> Option<Schedule> {
             graph.name(),
             graph.schedule()?.clone(),
             TRIGGERS_QUEUE,
-            Trigger::firing(graph.name()).to_bytes(),
+            Vec::new(),
         )
+        .headers(firing_headers(graph.name()))
         .backfill(backfill),
     )
 }

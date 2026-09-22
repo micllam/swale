@@ -10,11 +10,10 @@ use swale::records::{
     GraphRunRecord, GraphRunState, NodeRecord, RecordStatus, RequestOutcome, graph_key,
     graph_run_key, request_key,
 };
-use swale::scheduler::Error;
+use swale::scheduler::{Error, firing_headers};
 use swale::{
     Daemon, DaemonOptions, DefinitionStore, GraphRecord, OperatorSet, Partition, Pools, RecordHook,
     Request, RequestId, RequestStore, Scheduler, SchedulerOptions, StatusReader, TRIGGERS_QUEUE,
-    Trigger,
 };
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{ObjectStore, ObjectStoreExt};
@@ -259,8 +258,9 @@ async fn a_sync_pass_adopts_a_changed_pointer_and_refuses_a_definition_that_cann
             "orders",
             expression.parse().unwrap(),
             TRIGGERS_QUEUE,
-            Trigger::firing("orders").to_bytes(),
+            Vec::new(),
         )
+        .headers(firing_headers("orders"))
         .backfill(Some(Backfill {
             lookback: Duration::from_secs(3 * 86_400),
             start: BackfillStart::Lookback,
@@ -269,9 +269,7 @@ async fn a_sync_pass_adopts_a_changed_pointer_and_refuses_a_definition_that_cann
 
     // Before the adoption a trigger of the graph is refused.
     assert!(matches!(
-        scheduler
-            .handle_trigger(&Trigger::firing("orders"), Some(0))
-            .await,
+        scheduler.handle_trigger("orders", Some(0)).await,
         Err(Error::UnknownGraph(graph)) if graph == "orders"
     ));
 
@@ -299,10 +297,9 @@ async fn a_sync_pass_adopts_a_changed_pointer_and_refuses_a_definition_that_cann
     assert!(report.adopted.is_empty());
     assert_eq!(report.schedules, [schedule("0 2 * * *")]);
 
-    // A trigger without a partition and without an interval start is
-    // refused.
+    // A firing without an interval start is refused.
     assert!(matches!(
-        scheduler.handle_trigger(&Trigger::firing("orders"), None).await,
+        scheduler.handle_trigger("orders", None).await,
         Err(Error::NoPartition(graph)) if graph == "orders"
     ));
 
@@ -336,14 +333,11 @@ async fn a_sync_pass_adopts_a_changed_pointer_and_refuses_a_definition_that_cann
     let record = h.graph_record("orders").await.unwrap();
     assert_eq!(record.adopted_at_ms, ms("2026-09-16T13:00:00Z"));
 
-    // A target request starts the partitions it lists, once.
-    let request = Trigger {
-        graph: "orders".into(),
-        partitions: vec![Partition::new("20260901").unwrap()],
-    };
-    let started = scheduler.handle_trigger(&request, None).await.unwrap();
-    assert_eq!(started, request.partitions);
-    let started = scheduler.handle_trigger(&request, None).await.unwrap();
+    // A start request starts the partitions it lists, once.
+    let partitions = [Partition::new("20260901").unwrap()];
+    let started = scheduler.start_runs("orders", &partitions).await.unwrap();
+    assert_eq!(started, partitions);
+    let started = scheduler.start_runs("orders", &partitions).await.unwrap();
     assert!(started.is_empty());
     assert_eq!(h.graph_run("20260901").await.unwrap().definition, v3.hash);
 
