@@ -68,9 +68,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run after a delay with a state, which the next step reads as `Task::state`.
   `Task::now_ms` is the time of the step, and `store::provider_options` reads
   the object store options of a URL from the environment.
+- The retention of the records: `swale daemon --retention` and
+  `DaemonOptions::retention`, ninety days by default. The daemon's retention
+  pass (`Scheduler::expire`) removes the records of a graph run settled that
+  long ago and the request records of that age, through the expiry index at
+  `swale/expiry/`. 0.1.0 kept the records without a bound.
 
 ### Changed
 
+- **Breaking:** `GraphRunRecord` has the `settled_at_ms` field, the time of
+  the final state, which the retention pass reads. Add the field to a
+  struct literal.
 - **Breaking:** `Dispatch::new` and `Dispatch::with_env` take the clock of
   the store, `Task` has the `state` and `now_ms` fields and `Outcome` has
   the `Continue` variant. Pass the queue's clock, and add a wildcard arm to
@@ -90,7 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hourly` partition fails the load with `Problem::ScheduleWithoutPartition`.
   Declare `partition` in a scheduled graph.
 - **Breaking:** the `schedule` of a definition is parsed by `taquba-cron`
-  0.10, and the direct `croner` dependency is removed. A step without a range,
+  0.11, and the direct `croner` dependency is removed. A step without a range,
   as in `5/5 * * * *`, fails the load, and a `+` prefix on the day-of-week
   field requires both day fields to match. Write the range, as in
   `5-59/5 * * * *`, and remove the prefix to keep the earlier firing times.
@@ -140,6 +148,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** an operator has one `lease` field, an `operator::Lease` with
   `extension` and `interval`, which replaces the two fields `lease_extension`
   and `lease_interval`.
+- **Breaking:** swale depends on `taquba` 0.14 and `taquba-workflow` 0.13, whose
+  terminal markers of a task instance have a new key format, so the markers that
+  0.1.0 wrote are never swept. The keys with the prefixes `workflow/terminals/0`
+  and `workflow/group-terminals/0` of an existing store stay, and the daemon
+  does not read them.
 - The loader reports the faults of the file and the faults of the graph in
   one `Error::Invalid`. 0.1.0 reported the faults of the file alone when it
   had any.

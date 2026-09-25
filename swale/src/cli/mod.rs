@@ -79,6 +79,10 @@ enum Command {
         /// Seconds between sync passes over the published definitions.
         #[arg(long, default_value_t = 30)]
         sync_interval: u64,
+        /// The time the records of a settled graph run and the request
+        /// records are kept, such as `90d` or `12h`.
+        #[arg(long, default_value = "90d", value_parser = swale::duration::parse)]
+        retention: Duration,
     },
     /// Asks the daemon on a store to start the graph run of each partition.
     /// A partition with a graph run is unchanged.
@@ -159,12 +163,14 @@ pub(crate) async fn main() -> ExitCode {
             concurrency,
             pools,
             sync_interval,
+            retention,
         } => {
             daemon::daemon(
                 store,
                 concurrency,
                 pools,
                 Duration::from_secs(sync_interval),
+                retention,
             )
             .await
         }

@@ -48,4 +48,5 @@ tracing = { workspace = true }
 ulid = { workspace = true }
 bytes = { workspace = true }
 reqwest = { workspace = true }
+futures-util = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }

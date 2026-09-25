@@ -146,7 +146,7 @@ impl StatusReader {
     pub async fn graphs(&self) -> Result<Vec<GraphStatus>, Error> {
         let mut graphs: BTreeMap<String, GraphStatus> = BTreeMap::new();
         let adopted: Vec<Entry<GraphRecord>> =
-            records::scan(&self.reader, GRAPHS_PREFIX.as_bytes()).await?;
+            records::scan(self.reader.view(), GRAPHS_PREFIX.as_bytes()).await?;
         for Entry { key, record, .. } in adopted {
             let Some(name) = records::parse_graph_key(&key) else {
                 continue;
@@ -154,7 +154,7 @@ impl StatusReader {
             graph_entry(&mut graphs, &name).adopted = Some(record);
         }
         let runs: Vec<Entry<GraphRunRecord>> =
-            records::scan(&self.reader, GRAPH_RUNS_PREFIX.as_bytes()).await?;
+            records::scan(self.reader.view(), GRAPH_RUNS_PREFIX.as_bytes()).await?;
         for Entry { key, record, .. } in runs {
             let Some((name, partition)) = records::parse_graph_run_key(&key) else {
                 continue;
@@ -178,7 +178,7 @@ impl StatusReader {
         let prefix = format!("{GRAPH_RUNS_PREFIX}{graph}/");
         let mut runs = Vec::new();
         let entries: Vec<Entry<GraphRunRecord>> =
-            records::scan(&self.reader, prefix.as_bytes()).await?;
+            records::scan(self.reader.view(), prefix.as_bytes()).await?;
         for Entry { key, record, .. } in entries {
             let Some((_, partition)) = records::parse_graph_run_key(&key) else {
                 continue;
@@ -196,7 +196,7 @@ impl StatusReader {
         partition: &Partition,
     ) -> Result<Option<GraphRunStatus>, Error> {
         let key = records::graph_run_key(graph, partition);
-        let Some(record) = records::read::<GraphRunRecord>(&self.reader, &key).await? else {
+        let Some(record) = records::read::<GraphRunRecord>(self.reader.view(), &key).await? else {
             return Ok(None);
         };
         let definition = self
@@ -207,7 +207,8 @@ impl StatusReader {
         let mut node_records = BTreeMap::new();
         for node in definition.nodes() {
             let key = records::node_record_key(graph, partition, node);
-            if let Some(node_record) = records::read::<NodeRecord>(&self.reader, &key).await? {
+            if let Some(node_record) = records::read::<NodeRecord>(self.reader.view(), &key).await?
+            {
                 node_records.insert(node.name().to_string(), node_record);
             }
         }
@@ -233,16 +234,16 @@ impl StatusReader {
     /// The record of the request `id`, or `None` while the daemon did not
     /// apply the request.
     pub async fn request(&self, id: &RequestId) -> Result<Option<RequestRecord>, Error> {
-        Ok(records::read(&self.reader, &records::request_key(id)).await?)
+        Ok(records::read(self.reader.view(), &records::request_key(id)).await?)
     }
 
     /// The job counts of every queue of the store, by queue name.
     pub async fn queues(&self) -> Result<Vec<QueueStats>, Error> {
-        let mut names = self.reader.list_queues().await?;
+        let mut names = self.reader.view().list_queues().await?;
         names.sort();
         let mut stats = Vec::with_capacity(names.len());
         for name in names {
-            stats.push(self.reader.stats(&name).await?);
+            stats.push(self.reader.view().stats(&name).await?);
         }
         Ok(stats)
     }
@@ -254,10 +255,19 @@ impl StatusReader {
         queue: &str,
         limit: usize,
     ) -> Result<Option<Vec<JobRecord>>, Error> {
-        if !self.reader.list_queues().await?.iter().any(|q| q == queue) {
+        if !self
+            .reader
+            .view()
+            .list_queues()
+            .await?
+            .iter()
+            .any(|q| q == queue)
+        {
             return Ok(None);
         }
-        Ok(Some(self.reader.dead_jobs(queue, None, limit).await?))
+        Ok(Some(
+            self.reader.view().dead_jobs(queue, None, limit).await?,
+        ))
     }
 
     /// Closes the reader.

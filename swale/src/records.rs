@@ -7,15 +7,21 @@
 //! - `swale/tasks/{graph}/{partition}/{node}`: the [`NodeRecord`] of a task
 //!   node.
 //! - `swale/requests/{id}`: the [`RequestRecord`] of an applied request.
+//! - `swale/expiry/{time}runs/{graph}/{partition}` and
+//!   `swale/expiry/{time}requests/{id}`: the expiry index entry of a settled
+//!   graph run or of a request record, an entry of a [`taquba::ExpiryIndex`]
+//!   at [`EXPIRY_PREFIX`]. The time is the settle time or the handling time
+//!   as 8 bytes big-endian, and the rest is the [`Expiring`] suffix.
 
 use std::any::type_name;
 use std::collections::BTreeMap;
-use std::future::Future;
+use std::pin::pin;
 
 use bytes::Bytes;
+use futures_util::TryStreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use taquba::{KvPage, Queue, QueueReader};
+use taquba::{ExpiryIndex, QueueView};
 use taquba_workflow::TerminalStatus;
 
 use crate::graph::Node;
@@ -72,6 +78,57 @@ pub const REQUESTS_PREFIX: &str = "swale/requests/";
 /// The key of the request record.
 pub fn request_key(id: &RequestId) -> Vec<u8> {
     format!("{REQUESTS_PREFIX}{id}").into_bytes()
+}
+
+/// The prefix of the expiry index.
+pub const EXPIRY_PREFIX: &str = "swale/expiry/";
+
+/// The record an expiry index entry refers to: the suffix of the entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expiring {
+    /// The graph run record of a graph and a partition, with its node records.
+    Run {
+        /// The graph.
+        graph: String,
+        /// The partition.
+        partition: Partition,
+    },
+    /// The request record of a request.
+    Request(RequestId),
+}
+
+impl Expiring {
+    /// The suffix of the entry: `runs/{graph}/{partition}` or `requests/{id}`.
+    pub fn suffix(&self) -> Vec<u8> {
+        match self {
+            Expiring::Run { graph, partition } => format!("runs/{graph}/{partition}"),
+            Expiring::Request(id) => format!("requests/{id}"),
+        }
+        .into_bytes()
+    }
+
+    /// The record of the entry with `suffix`, or `None` for another suffix.
+    pub fn parse(suffix: &[u8]) -> Option<Self> {
+        let (kind, rest) = std::str::from_utf8(suffix).ok()?.split_once('/')?;
+        Some(match kind {
+            "runs" => {
+                let (graph, partition) = rest.split_once('/')?;
+                Expiring::Run {
+                    graph: graph.to_string(),
+                    partition: Partition::new(partition).ok()?,
+                }
+            }
+            "requests" => Expiring::Request(RequestId::new(rest).ok()?),
+            _ => return None,
+        })
+    }
+}
+
+/// The time and the record of an expiry index entry key, or `None` for another
+/// key.
+pub fn parse_expiry_key(key: &[u8]) -> Option<(u64, Expiring)> {
+    let (time_ms, suffix) = ExpiryIndex::new(EXPIRY_PREFIX).parse(key)?;
+    Some((time_ms, Expiring::parse(suffix)?))
 }
 
 /// The key of the record of `node` for `partition`: the asset key of an asset
@@ -196,6 +253,12 @@ pub struct GraphRunRecord {
     pub requested_at_ms: u64,
     /// The state.
     pub state: GraphRunState,
+    /// The time the final state was written, in milliseconds from the Unix
+    /// epoch. `None` while the run is active. The expiry index entry of the run
+    /// has the same time, and the retention pass removes the records of the run
+    /// once the time is a retention window in the past.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at_ms: Option<u64>,
     /// The rerun count each listed node must reach for its record to be
     /// current, by node name. A rerun of a succeeded node lists the node and
     /// the nodes downstream of it through an all-succeeded edge, and the
@@ -310,57 +373,13 @@ pub enum ReadError {
     Record(#[from] RecordError),
 }
 
-/// A reader of the KV namespace: the queue of the process that opened the
-/// store, or a reader of another process.
-pub trait KvRead: Sync {
-    /// The value at `key`.
-    fn kv_get(&self, key: &[u8]) -> impl Future<Output = taquba::Result<Option<Bytes>>> + Send;
-
-    /// One page of the entries with `prefix`, from `cursor`.
-    fn kv_scan(
-        &self,
-        prefix: &[u8],
-        cursor: Option<&[u8]>,
-        limit: usize,
-    ) -> impl Future<Output = taquba::Result<KvPage>> + Send;
-}
-
-impl KvRead for Queue {
-    async fn kv_get(&self, key: &[u8]) -> taquba::Result<Option<Bytes>> {
-        Queue::kv_get(self, key).await
-    }
-
-    async fn kv_scan(
-        &self,
-        prefix: &[u8],
-        cursor: Option<&[u8]>,
-        limit: usize,
-    ) -> taquba::Result<KvPage> {
-        Queue::kv_scan(self, prefix, cursor, limit).await
-    }
-}
-
-impl KvRead for QueueReader {
-    async fn kv_get(&self, key: &[u8]) -> taquba::Result<Option<Bytes>> {
-        QueueReader::kv_get(self, key).await
-    }
-
-    async fn kv_scan(
-        &self,
-        prefix: &[u8],
-        cursor: Option<&[u8]>,
-        limit: usize,
-    ) -> taquba::Result<KvPage> {
-        QueueReader::kv_scan(self, prefix, cursor, limit).await
-    }
-}
-
 /// The entries of one scan page.
 const PAGE: usize = 256;
 
-/// The record at `key`, or `None` when there is no value at the key.
-pub async fn read<T: JsonBytes>(kv: &impl KvRead, key: &[u8]) -> Result<Option<T>, ReadError> {
-    match kv.kv_get(key).await? {
+/// The record at `key`, or `None` when there is no value at the key. The view
+/// is the queue's for the daemon's process and a reader's for another process.
+pub async fn read<T: JsonBytes>(view: &QueueView, key: &[u8]) -> Result<Option<T>, ReadError> {
+    match view.kv_get(key).await? {
         Some(bytes) => Ok(Some(parse(key, &bytes)?)),
         None => Ok(None),
     }
@@ -380,24 +399,18 @@ pub struct Entry<T> {
 /// Every record with `prefix`, in key order. A value that is not a `T` is
 /// logged and skipped, so one malformed record does not end a listing.
 pub async fn scan<T: JsonBytes>(
-    kv: &impl KvRead,
+    view: &QueueView,
     prefix: &[u8],
 ) -> Result<Vec<Entry<T>>, taquba::Error> {
     let mut records = Vec::new();
-    let mut cursor: Option<Vec<u8>> = None;
-    loop {
-        let page = kv.kv_scan(prefix, cursor.as_deref(), PAGE).await?;
-        for (key, bytes) in page.entries {
-            match parse::<T>(&key, &bytes) {
-                Ok(record) => records.push(Entry { key, bytes, record }),
-                Err(e) => tracing::warn!(error = %e, "record skipped"),
-            }
-        }
-        match page.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(records),
+    let mut entries = pin!(view.kv_entries(prefix, .., PAGE));
+    while let Some((key, bytes)) = entries.try_next().await? {
+        match parse::<T>(&key, &bytes) {
+            Ok(record) => records.push(Entry { key, bytes, record }),
+            Err(e) => tracing::warn!(error = %e, "record skipped"),
         }
     }
+    Ok(records)
 }
 
 #[cfg(test)]
@@ -431,7 +444,7 @@ mod tests {
         assert_eq!(parse_graph_key(b"swale/runs/orders_daily/20260915"), None);
         assert_eq!(
             parse_graph_run_key(b"swale/runs/orders_daily/20260915"),
-            Some(("orders_daily".to_string(), partition))
+            Some(("orders_daily".to_string(), partition.clone()))
         );
         assert_eq!(
             parse_graph_run_key(b"swale/assets/orders_raw/20260915"),
@@ -441,6 +454,42 @@ mod tests {
             parse_graph_run_key(b"swale/runs/orders_daily/2026-09"),
             None
         );
+        let id = RequestId::new("01J").unwrap();
+        let run = Expiring::Run {
+            graph: "orders_daily".to_string(),
+            partition: partition.clone(),
+        };
+        let request = Expiring::Request(id);
+        assert_eq!(run.suffix(), b"runs/orders_daily/20260915");
+        assert_eq!(request.suffix(), b"requests/01J");
+        assert_eq!(Expiring::parse(&run.suffix()), Some(run.clone()));
+        assert_eq!(Expiring::parse(&request.suffix()), Some(request.clone()));
+        let index = ExpiryIndex::new(EXPIRY_PREFIX);
+        let key = index.entry_key(7, &run.suffix());
+        assert_eq!(
+            key,
+            b"swale/expiry/\0\0\0\0\0\0\0\x07runs/orders_daily/20260915"
+        );
+        assert_eq!(parse_expiry_key(&key), Some((7, run)));
+        assert_eq!(
+            parse_expiry_key(&index.entry_key(1_700_000_000_000, &request.suffix())),
+            Some((1_700_000_000_000, request))
+        );
+        for suffix in [
+            &b"memos/a"[..],
+            b"runs/orders_daily",
+            b"requests/a b",
+            b"runs",
+        ] {
+            assert_eq!(
+                Expiring::parse(suffix),
+                None,
+                "{}",
+                String::from_utf8_lossy(suffix)
+            );
+        }
+        assert_eq!(parse_expiry_key(b"swale/expiry/7"), None);
+        assert_eq!(parse_expiry_key(b"swale/runs/orders_daily/20260915"), None);
     }
 
     #[test]
@@ -464,12 +513,16 @@ mod tests {
             definition: "abc".into(),
             requested_at_ms: 7,
             state: GraphRunState::Active,
+            settled_at_ms: None,
             expected_reruns: BTreeMap::new(),
         };
         let json = String::from_utf8(run.to_bytes()).unwrap();
+        assert!(!json.contains("settled_at_ms"), "{json}");
         assert!(!json.contains("expected_reruns"), "{json}");
         assert_eq!(GraphRunRecord::from_bytes(json.as_bytes()).unwrap(), run);
         let run = GraphRunRecord {
+            state: GraphRunState::Complete,
+            settled_at_ms: Some(8),
             expected_reruns: BTreeMap::from([("transform".to_string(), 1)]),
             ..run
         };

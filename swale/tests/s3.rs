@@ -167,7 +167,11 @@ async fn daemon_adopts_a_published_graph_and_catches_up_on_the_url() {
             continue;
         };
         let prefix = format!("{GRAPH_RUNS_PREFIX}catch_up/");
-        let page = reader.kv_scan(prefix.as_bytes(), None, 100).await.unwrap();
+        let page = reader
+            .view()
+            .kv_scan(prefix.as_bytes(), .., 100)
+            .await
+            .unwrap();
         complete = page
             .entries
             .iter()

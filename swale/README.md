@@ -115,6 +115,10 @@ schedule and runs the task instances. A graph run keeps the definition it
 started from, so an edit applies from the next graph run. The `default` pool
 always exists, and `--pool name=steps` adds a pool.
 
+The daemon keeps the records of a settled graph run and the request records
+for `--retention`, ninety days by default. A start of a partition whose
+records were removed runs the graph again.
+
 Every command that opens a store takes `--store`: a directory or an object
 store URL (`s3://bucket/prefix`, `gs://bucket/prefix`,
 `az://container/prefix`). A cloud scheme needs the matching cargo feature

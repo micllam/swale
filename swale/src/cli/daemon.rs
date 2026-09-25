@@ -15,6 +15,7 @@ pub(crate) async fn daemon(
     concurrency: usize,
     pools: Vec<(String, usize)>,
     sync_interval: Duration,
+    retention: Duration,
 ) -> CommandResult {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -42,6 +43,7 @@ pub(crate) async fn daemon(
         .run(
             DaemonOptions {
                 sync_interval,
+                retention,
                 ..DaemonOptions::default()
             },
             async {

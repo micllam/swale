@@ -10,23 +10,23 @@
 //!
 //! The daemon applies a request through [`Scheduler::handle_request`]. The
 //! record of a rerun commits with the submit of the task instance. A request
-//! applied a second time after a crash therefore does not submit a second
-//! task instance.
+//! applied a second time after a crash therefore does not submit a second task
+//! instance. The expiry index entry of a record commits with the record.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
+use taquba::SettlementEffects;
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{self, ObjectStore};
 use taquba_workflow::RunId;
 
 use crate::partition::Partition;
 use crate::records::JsonBytes;
-use crate::records::{self, RequestOutcome, RequestRecord};
+use crate::records::{self, Expiring, RequestOutcome, RequestRecord};
 use crate::scheduler::{Error, RerunOutcome, Scheduler};
 use crate::store::ObjectPrefix;
 
@@ -187,7 +187,6 @@ impl Scheduler {
         id: &RequestId,
         request: &Request,
     ) -> Result<RequestRecord, Error> {
-        let key = records::request_key(id);
         let handled_at_ms = self.clock.now_ms();
         let record = |outcome| RequestRecord {
             request: request.clone(),
@@ -215,7 +214,7 @@ impl Scheduler {
                 };
                 let outcome = self
                     .rerun_with(graph, partition, node, |run_id| {
-                        HashMap::from([(key.clone(), rerun_record(run_id).to_bytes())])
+                        self.request_effects(id, &rerun_record(run_id))
                     })
                     .await;
                 let reason = match outcome {
@@ -242,8 +241,22 @@ impl Scheduler {
             }
         };
         let record = record(outcome);
-        self.queue.kv_put(&key, &record.to_bytes()).await?;
+        self.queue
+            .commit_effects(self.request_effects(id, &record))
+            .await?;
         Ok(record)
+    }
+
+    /// The write of `record` at the key of the request `id` with the expiry
+    /// index entry of the record.
+    fn request_effects(&self, id: &RequestId, record: &RequestRecord) -> SettlementEffects {
+        SettlementEffects::default()
+            .kv_put(records::request_key(id), record.to_bytes())
+            .expiry_entry(
+                &self.expiry,
+                record.handled_at_ms,
+                &Expiring::Request(id.clone()).suffix(),
+            )
     }
 }
 

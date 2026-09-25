@@ -37,7 +37,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use taquba::{
-    Clock, JobRecord, LeaseHandle, PermanentFailure, Queue, Worker, WorkerError, WorkerHandle,
+    Clock, ExpiryIndex, JobRecord, LeaseHandle, PermanentFailure, Queue, SettlementEffects, Worker,
+    WorkerError, WorkerHandle,
 };
 use taquba_cron::PREVIOUS_FIRE_MS_HEADER;
 use taquba_workflow::{RunId, RunOptions, RunSpec, RunState};
@@ -54,8 +55,8 @@ use crate::readiness::{
 };
 use crate::records::JsonBytes;
 use crate::records::{
-    self, Entry, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord, ReadError, RecordError,
-    RecordStatus,
+    self, EXPIRY_PREFIX, Entry, Expiring, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord,
+    ReadError, RecordError, RecordStatus,
 };
 use crate::task::{self, HEADER_GRAPH, TaskIdentity};
 
@@ -224,6 +225,8 @@ pub struct Scheduler {
     definitions: Arc<DefinitionStore>,
     pools: Arc<Pools>,
     pub(crate) clock: Arc<dyn Clock>,
+    /// The expiry index of the records, at [`EXPIRY_PREFIX`].
+    pub(crate) expiry: ExpiryIndex,
 }
 
 impl Scheduler {
@@ -237,6 +240,7 @@ impl Scheduler {
             definitions,
             pools,
             clock,
+            expiry: ExpiryIndex::new(EXPIRY_PREFIX),
         }
     }
 
@@ -248,7 +252,7 @@ impl Scheduler {
     /// The graph record of `graph`, or `None` when the process did not adopt
     /// a definition of the graph.
     pub async fn graph_record(&self, graph: &str) -> Result<Option<GraphRecord>, Error> {
-        Ok(records::read(&*self.queue, &records::graph_key(graph)).await?)
+        Ok(records::read(self.queue.view(), &records::graph_key(graph)).await?)
     }
 
     /// Starts the graph run of the definition `hash` for `partition`: writes
@@ -264,6 +268,7 @@ impl Scheduler {
             definition: hash.to_string(),
             requested_at_ms: self.clock.now_ms(),
             state: GraphRunState::Active,
+            settled_at_ms: None,
             expected_reruns: BTreeMap::new(),
         };
         let key = records::graph_run_key(graph.name(), partition);
@@ -284,7 +289,7 @@ impl Scheduler {
                     node,
                     identity(&graph, hash, partition, node, 0),
                     &BTreeMap::new(),
-                    |_| HashMap::new(),
+                    |_| SettlementEffects::default(),
                 )
                 .await?;
             submitted.push(run_id);
@@ -307,18 +312,20 @@ impl Scheduler {
         partition: &Partition,
         node: &str,
     ) -> Result<RerunOutcome, Error> {
-        self.rerun_with(graph_name, partition, node, |_| HashMap::new())
-            .await
+        self.rerun_with(graph_name, partition, node, |_| {
+            SettlementEffects::default()
+        })
+        .await
     }
 
-    /// [`Self::rerun`] with the KV writes of `kv_writes`, given the run id,
+    /// [`Self::rerun`] with the effects of `effects`, given the run id,
     /// committed with the submit.
     pub(crate) async fn rerun_with(
         &self,
         graph_name: &str,
         partition: &Partition,
         node: &str,
-        kv_writes: impl FnOnce(&RunId) -> HashMap<Vec<u8>, Vec<u8>>,
+        effects: impl FnOnce(&RunId) -> SettlementEffects,
     ) -> Result<RerunOutcome, Error> {
         let key = records::graph_run_key(graph_name, partition);
         let Some((run, bytes)) = self.graph_run(&key).await? else {
@@ -338,6 +345,7 @@ impl Scheduler {
         };
         let mut active = GraphRunRecord {
             state: GraphRunState::Active,
+            settled_at_ms: None,
             ..run.clone()
         };
         if record.status == RecordStatus::Succeeded && run.is_current(node.name(), record) {
@@ -372,7 +380,7 @@ impl Scheduler {
             record.rerun + 1,
         );
         let (run_id, new) = self
-            .submit_node(node, identity, &upstream_records(node, &current), kv_writes)
+            .submit_node(node, identity, &upstream_records(node, &current), effects)
             .await?;
         Ok(if new {
             RerunOutcome::Submitted(run_id)
@@ -381,9 +389,9 @@ impl Scheduler {
         })
     }
 
-    /// Cancels the graph run: writes the cancelled state and cancels every
-    /// active task instance. `false` when the run does not exist or is not
-    /// active.
+    /// Cancels the graph run: writes the cancelled state with the settle time
+    /// and cancels every active task instance. `false` when the run does not
+    /// exist or is not active.
     pub async fn cancel_run(&self, graph_name: &str, partition: &Partition) -> Result<bool, Error> {
         let key = records::graph_run_key(graph_name, partition);
         let Some((run, bytes)) = self.graph_run(&key).await? else {
@@ -397,8 +405,7 @@ impl Scheduler {
             ..run.clone()
         };
         if !self
-            .queue
-            .kv_compare_put(&key, Some(&bytes), &cancelled.to_bytes())
+            .commit_settled(graph_name, partition, &bytes, cancelled)
             .await?
         {
             return Ok(false);
@@ -494,7 +501,7 @@ impl Scheduler {
     pub async fn reconcile(&self) -> Result<ReconcileReport, Error> {
         let mut report = ReconcileReport::default();
         let runs: Vec<Entry<GraphRunRecord>> =
-            records::scan(&*self.queue, records::GRAPH_RUNS_PREFIX.as_bytes()).await?;
+            records::scan(self.queue.view(), records::GRAPH_RUNS_PREFIX.as_bytes()).await?;
         for Entry {
             key,
             bytes,
@@ -608,7 +615,7 @@ impl Scheduler {
     }
 
     async fn graph_run(&self, key: &[u8]) -> Result<Option<(GraphRunRecord, Vec<u8>)>, Error> {
-        let Some(bytes) = self.queue.kv_get(key).await? else {
+        let Some(bytes) = self.queue.view().kv_get(key).await? else {
             return Ok(None);
         };
         let record = records::parse::<GraphRunRecord>(key, &bytes)?;
@@ -622,7 +629,7 @@ impl Scheduler {
         node: &Node,
     ) -> Result<Option<NodeRecord>, Error> {
         let key = records::node_record_key(graph.name(), partition, node);
-        Ok(records::read(&*self.queue, &key).await?)
+        Ok(records::read(self.queue.view(), &key).await?)
     }
 
     /// The node records of the graph run of `graph` for `partition`, by
@@ -666,7 +673,7 @@ impl Scheduler {
                     node,
                     identity(graph, &run.definition, partition, node, rerun),
                     &upstream_records(node, &current),
-                    |_| HashMap::new(),
+                    |_| SettlementEffects::default(),
                 )
                 .await?;
             if new {
@@ -679,15 +686,15 @@ impl Scheduler {
         Ok((submitted, settled))
     }
 
-    /// Submits the task instance `identity` of `node`, with the KV writes of
-    /// `kv_writes` committed with a new submit. Returns the run id and
-    /// whether the submit was new.
+    /// Submits the task instance `identity` of `node`, with the effects of
+    /// `effects` committed with a new submit. Returns the run id and whether
+    /// the submit was new.
     async fn submit_node(
         &self,
         node: &Node,
         identity: TaskIdentity,
         upstreams: &BTreeMap<String, NodeRecord>,
-        kv_writes: impl FnOnce(&RunId) -> HashMap<Vec<u8>, Vec<u8>>,
+        effects: impl FnOnce(&RunId) -> SettlementEffects,
     ) -> Result<(RunId, bool), Error> {
         let runtime = self
             .pools
@@ -706,7 +713,7 @@ impl Scheduler {
                     max_attempts_per_step: Some(node.retries() + 1),
                     ..RunOptions::default()
                 },
-                kv_writes: kv_writes(&run_id),
+                effects: effects(&run_id),
             })
             .await?;
         if outcome.newly_submitted {
@@ -715,10 +722,11 @@ impl Scheduler {
         Ok((run_id, outcome.newly_submitted))
     }
 
-    /// Writes the final state of the graph run when it is reached: the
-    /// state of [`settled_state`], once no unrecorded task instance is
-    /// active. The write removes an expected rerun count that a record
-    /// reached. `true` when the state was written.
+    /// Writes the final state of the graph run when it is reached: the state of
+    /// [`settled_state`] with the settle time, once no unrecorded task instance
+    /// is active. The write removes an expected rerun count that a record
+    /// reached, and the expiry index entry of the run commits with it. `true`
+    /// when the state was written.
     async fn settle(
         &self,
         graph: &Graph,
@@ -731,8 +739,8 @@ impl Scheduler {
         let Some(state) = settled_state(states) else {
             return Ok(false);
         };
-        // A blocked node can have an active run at count 0 from the time it
-        // was ready, and a failed or cancelled node can have an active rerun.
+        // A blocked node can have an active run at count 0 from the time it was
+        // ready, and a failed or cancelled node can have an active rerun.
         for node in graph.nodes() {
             if let Some(run_id) = unrecorded_run_id(graph, partition, run, node, records)
                 && self.run_is_active(node, &run_id).await?
@@ -749,15 +757,44 @@ impl Scheduler {
                 .get(name)
                 .is_none_or(|record| record.rerun < *expected)
         });
-        let key = records::graph_run_key(graph.name(), partition);
         let written = self
-            .queue
-            .kv_compare_put(&key, Some(bytes), &settled.to_bytes())
+            .commit_settled(graph.name(), partition, bytes, settled)
             .await?;
         if written {
             tracing::info!(graph = graph.name(), %partition, state = ?state, "graph run settled");
         }
         Ok(written)
+    }
+
+    /// Commits the graph run record `settled` with the clock's time as its
+    /// settle time and the expiry index entry of the run at that time, against
+    /// the stored bytes `expected` of the active record. `false` when the
+    /// stored record differs from `expected`.
+    async fn commit_settled(
+        &self,
+        graph_name: &str,
+        partition: &Partition,
+        expected: &[u8],
+        settled: GraphRunRecord,
+    ) -> Result<bool, Error> {
+        let key = records::graph_run_key(graph_name, partition);
+        let settled_at_ms = self.clock.now_ms();
+        let settled = GraphRunRecord {
+            settled_at_ms: Some(settled_at_ms),
+            ..settled
+        };
+        let expiring = Expiring::Run {
+            graph: graph_name.to_string(),
+            partition: partition.clone(),
+        };
+        let effects = SettlementEffects::default()
+            .kv_put(key.clone(), settled.to_bytes())
+            .expiry_entry(&self.expiry, settled_at_ms, &expiring.suffix());
+        Ok(self
+            .queue
+            .kv_compare_commit(&key, Some(expected), effects)
+            .await?
+            .is_some())
     }
 
     async fn run_is_active(&self, node: &Node, run_id: &RunId) -> Result<bool, Error> {

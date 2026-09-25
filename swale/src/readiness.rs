@@ -385,6 +385,7 @@ argv = ["true"]
             definition: "abc".into(),
             requested_at_ms: 0,
             state: GraphRunState::Active,
+            settled_at_ms: None,
             expected_reruns: BTreeMap::from([("b".to_string(), 1), ("join".to_string(), 1)]),
         };
         let current = current_records(&run, &records);

@@ -122,6 +122,7 @@ impl Harness {
 
     async fn graph_run(&self) -> Option<GraphRunRecord> {
         self.queue
+            .view()
             .kv_get(&graph_run_key("orders", &Self::partition()))
             .await
             .unwrap()
@@ -130,6 +131,7 @@ impl Harness {
 
     async fn record(&self, key: &str) -> Option<NodeRecord> {
         self.queue
+            .view()
             .kv_get(key.as_bytes())
             .await
             .unwrap()
@@ -186,6 +188,7 @@ async fn a_graph_run_completes_with_records_and_outputs_flow_through_templates()
 
     let run = h.wait_for_state(GraphRunState::Complete).await;
     assert_eq!(run.definition, h.hash);
+    assert_eq!(run.settled_at_ms, Some(1_700_000_000_000));
 
     let extract = h.record("swale/assets/orders_raw/20260915").await.unwrap();
     assert_eq!(extract.status, RecordStatus::Succeeded);
@@ -276,6 +279,7 @@ async fn a_dead_lettered_node_fails_the_run_blocks_its_downstream_and_a_rerun_re
     // The dead-letter is in the pool's dead set for inspection.
     let dead = h
         .queue
+        .view()
         .dead_jobs("swale-pool-default", None, 10)
         .await
         .unwrap();
@@ -367,6 +371,7 @@ async fn a_rerun_of_a_succeeded_node_runs_its_downstreams_again() {
     assert_eq!(rerun, submitted("orders-20260915-transform-r2"));
     let run = h.graph_run().await.unwrap();
     assert_eq!(run.state, GraphRunState::Active);
+    assert_eq!(run.settled_at_ms, None);
     assert_eq!(
         run.expected_reruns,
         BTreeMap::from([("transform".to_string(), 2), ("load".to_string(), 2)])
@@ -398,7 +403,9 @@ async fn a_cancelled_graph_run_submits_no_further_node() {
             .await
             .unwrap()
     );
-    assert_eq!(h.graph_run().await.unwrap().state, GraphRunState::Cancelled);
+    let run = h.graph_run().await.unwrap();
+    assert_eq!(run.state, GraphRunState::Cancelled);
+    assert_eq!(run.settled_at_ms, Some(1_700_000_000_000));
 
     // Regardless of how `extract` ended, the scheduler ignores its event,
     // and `load` is never submitted.
@@ -427,6 +434,7 @@ async fn the_reconciler_submits_ready_nodes_and_settles_the_run_without_events()
         definition: h.hash.clone(),
         requested_at_ms: 0,
         state: GraphRunState::Active,
+        settled_at_ms: None,
         expected_reruns: BTreeMap::new(),
     };
     h.queue.kv_put(&key, &run.to_bytes()).await.unwrap();
@@ -499,6 +507,7 @@ async fn a_rerun_states_the_run_id_submitted_or_why_the_node_was_not_rerun() {
         definition: h.hash.clone(),
         requested_at_ms: 0,
         state: GraphRunState::Active,
+        settled_at_ms: None,
         expected_reruns: BTreeMap::new(),
     };
     h.queue.kv_put(&key, &run.to_bytes()).await.unwrap();

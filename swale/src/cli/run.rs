@@ -6,8 +6,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use swale::JsonBytes;
-use swale::records::{GraphRunRecord, GraphRunState, NodeRecord, graph_run_key, node_record_key};
+use swale::records::{
+    self, GraphRunRecord, GraphRunState, NodeRecord, graph_run_key, node_record_key,
+};
 use swale::{OperatorSet, Partition, Partitioning, SchedulerOptions};
 use tokio_util::sync::CancellationToken;
 
@@ -83,8 +84,7 @@ pub(crate) async fn run(
                 continue;
             }
             let key = node_record_key(graph.name(), &partition, node);
-            if let Some(bytes) = queue.kv_get(&key).await? {
-                let record = NodeRecord::from_bytes(&bytes)?;
+            if let Some(record) = records::read::<NodeRecord>(queue.view(), &key).await? {
                 println!("  {}: {} ({})", node.name(), record.status, record.run_id);
                 if let Some(error) = &record.error {
                     println!("    {error}");
@@ -92,11 +92,10 @@ pub(crate) async fn run(
                 printed.insert(node.name().to_string());
             }
         }
-        if let Some(bytes) = queue.kv_get(&run_key).await? {
-            let run = GraphRunRecord::from_bytes(&bytes)?;
-            if run.state != GraphRunState::Active {
-                break run.state;
-            }
+        if let Some(run) = records::read::<GraphRunRecord>(queue.view(), &run_key).await?
+            && run.state != GraphRunState::Active
+        {
+            break run.state;
         }
     };
     println!("{}/{partition}: {state}", graph.name());

@@ -31,6 +31,13 @@
 //! at the request's key. The pass then removes the object. A request whose
 //! record exists is not applied again, so a crash between the record and
 //! the removal does not apply the request twice.
+//!
+//! # Retention
+//!
+//! After a request pass that succeeded, a retention pass
+//! ([`Scheduler::expire`]) removes the records of every graph run settled
+//! [`DaemonOptions::retention`] or more ago. The request records of the same
+//! age are removed with them.
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
@@ -55,6 +62,9 @@ pub struct DaemonOptions {
     pub scheduler: SchedulerOptions,
     /// The time between sync passes.
     pub sync_interval: Duration,
+    /// The time the records of a settled graph run and the request records are
+    /// kept, ninety days by default.
+    pub retention: Duration,
 }
 
 impl Default for DaemonOptions {
@@ -62,6 +72,7 @@ impl Default for DaemonOptions {
         DaemonOptions {
             scheduler: SchedulerOptions::default(),
             sync_interval: Duration::from_secs(30),
+            retention: Duration::from_secs(90 * 86_400),
         }
     }
 }
@@ -178,7 +189,7 @@ impl Daemon {
         let mut report = RequestReport::default();
         for (id, bytes) in self.requests.list().await? {
             let key = records::request_key(&id);
-            if self.queue.kv_get(&key).await?.is_none() {
+            if self.queue.view().kv_get(&key).await?.is_none() {
                 match Request::from_bytes(&bytes) {
                     Ok(request) => match self.scheduler.handle_request(&id, &request).await {
                         Ok(record) => {
@@ -200,8 +211,8 @@ impl Daemon {
         Ok(report)
     }
 
-    /// Runs the pools, the scheduler, the sync pass at its interval and the
-    /// cron entries until `shutdown` resolves.
+    /// Runs the pools, the scheduler, the sync, request and retention passes at
+    /// the sync interval and the cron entries until `shutdown` resolves.
     pub async fn run<F: Future<Output = ()>>(
         &self,
         options: DaemonOptions,
@@ -223,8 +234,13 @@ impl Daemon {
                 Ok(report) => self.register(&handle, report.schedules),
                 Err(e) => tracing::warn!(error = %e, "sync pass failed"),
             }
-            if let Err(e) = self.apply_requests().await {
-                tracing::warn!(error = %e, "request pass failed");
+            match self.apply_requests().await {
+                Ok(_) => {
+                    if let Err(e) = self.scheduler.expire(options.retention).await {
+                        tracing::warn!(error = %e, "retention pass failed");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "request pass failed"),
             }
             tokio::select! {
                 () = tokio::time::sleep(options.sync_interval) => {}
