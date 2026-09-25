@@ -18,8 +18,9 @@ documents the API and the command in full.
 
 One TOML file per graph. An asset node declares the asset it produces and the
 assets it consumes, and a task node declares its upstream nodes with `after`.
-Every node runs an operator with parameters, and a parameter string can refer
-to the partition or to the output of an upstream node.
+Every node runs an operator with parameters, and a parameter string can refer to
+the partition, to the output of an upstream node or to an environment variable
+of the daemon.
 
 ```toml
 [graph]
@@ -30,18 +31,26 @@ partition = "daily"
 [[node]]
 name = "extract"
 produces = "orders_raw"
-operator = "subprocess"
+operator = "shell"
 [node.params]
-argv = ["python", "tasks/extract.py"]
+command = "dbt run --select orders_raw >&2 && printf '{\"table\": \"orders_raw\"}'"
 
 [[node]]
 name = "load"
 produces = "orders_warehouse"
 consumes = ["orders_raw"]
-operator = "subprocess"
+operator = "http"
 [node.params]
-argv = ["python", "tasks/load.py", "{{ upstream.extract.rows_key }}"]
+method = "POST"
+url = "https://warehouse.example/load"
+body = '{"table": "{{ upstream.extract.table }}"}'
 ```
+
+The built-in operators are `subprocess`, which runs a program with a JSON
+document on stdin, `shell`, which runs a command line with `sh -c`, `http`,
+which sends one request, and `object_exists`, which waits for an object at a
+store URL. The output of a node is the JSON it prints or receives, and a
+downstream node refers to it as `{{ upstream.<node>.<path> }}`.
 
 ## Command
 
