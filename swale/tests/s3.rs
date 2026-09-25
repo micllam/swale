@@ -28,7 +28,7 @@ const LOCAL_EXAMPLE: &str = "examples/local.toml";
 const CATCH_UP_GRAPH: &str = r#"
 [graph]
 name = "catch_up"
-schedule = "*/10 * * * *"
+schedule = "0 * * * *"
 catchup = "2h"
 partition = "hourly"
 

@@ -90,7 +90,8 @@ The daemon fires the `schedule` of a graph, a cron expression with five fields
 in UTC. The partition of a firing is the start of the schedule interval that
 ends at the firing time: a daily schedule at 02:00 that fires on 2026-09-16
 runs the partition `20260915`. A graph with a schedule declares `partition` as
-`daily` or `hourly`.
+`daily` or `hourly`, and a schedule that fires more than once within a
+partition, such as `0 2,14 * * *` with a daily partition, fails the load.
 
 The first adoption of a graph runs the partitions of the firings within its
 `catchup` window. After downtime the daemon replays the missed firings within

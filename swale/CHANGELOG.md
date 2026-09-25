@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A schedule that fires more than once within a partition, such as
+  `0 2,14 * * *` with a daily partition, fails the load with
+  `Problem::ScheduleWithinPartition`. Such a graph changes its schedule or its
+  partition.
+
 ## [0.2.0] - 2026-09-25
 
 ### Added

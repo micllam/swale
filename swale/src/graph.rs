@@ -3,11 +3,13 @@
 //! through [`Graph::build`].
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::time::Duration;
 
 use taquba_cron::Expression;
 
 use crate::operator::{OperatorError, OperatorSet};
+use crate::partition::Partition;
 use crate::template::Template;
 
 /// Maximum length of a graph name and a node name together. A run id is
@@ -25,6 +27,18 @@ pub enum Partitioning {
     /// A single partition, formatted `none`.
     #[default]
     Unpartitioned,
+}
+
+impl fmt::Display for Partitioning {
+    /// The value of the `partition` field of a definition: `daily`, `hourly`
+    /// or `none`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Partitioning::Daily => "daily",
+            Partitioning::Hourly => "hourly",
+            Partitioning::Unpartitioned => "none",
+        })
+    }
 }
 
 /// The condition on the upstream task instances of a task node.
@@ -189,6 +203,15 @@ pub enum Problem {
     /// schedule runs a partition of its own.
     #[error("a graph with a schedule declares `partition` as `daily` or `hourly`")]
     ScheduleWithoutPartition,
+    /// The schedule fires more than once within a partition. Every firing of a
+    /// schedule runs a partition of its own.
+    #[error("schedule `{expression}` fires more than once within a `{partitioning}` partition")]
+    ScheduleWithinPartition {
+        /// The schedule text.
+        expression: String,
+        /// The partitioning.
+        partitioning: Partitioning,
+    },
     /// The catch-up window is not a duration.
     #[error("catchup: {0}")]
     InvalidCatchup(String),
@@ -313,7 +336,15 @@ impl Graph {
         let mut schedule = None;
         if let Some(expression) = &spec.schedule {
             match expression.parse::<Expression>() {
-                Ok(parsed) => schedule = Some(parsed),
+                Ok(parsed) => {
+                    if fires_twice_within_a_partition(&parsed, spec.partitioning) {
+                        problems.push(Problem::ScheduleWithinPartition {
+                            expression: expression.clone(),
+                            partitioning: spec.partitioning,
+                        });
+                    }
+                    schedule = Some(parsed);
+                }
                 Err(e) => {
                     let message = match e {
                         taquba_cron::Error::InvalidExpression { message, .. } => message,
@@ -525,6 +556,24 @@ pub fn is_name(text: &str) -> bool {
         && text
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Whether two occurrences of `schedule` are within one partition of
+/// `partitioning`. The time fields of an expression apply on every day the
+/// expression fires, so the two neighbours of the first occurrence after the
+/// Unix epoch decide for every occurrence.
+fn fires_twice_within_a_partition(schedule: &Expression, partitioning: Partitioning) -> bool {
+    if partitioning == Partitioning::Unpartitioned {
+        return false;
+    }
+    let Some(first) = schedule.next_after(0) else {
+        return false;
+    };
+    let partition = Partition::of_time(partitioning, first);
+    [schedule.previous_before(first), schedule.next_after(first)]
+        .into_iter()
+        .flatten()
+        .any(|ms| Partition::of_time(partitioning, ms) == partition)
 }
 
 fn check_templates(
@@ -774,6 +823,53 @@ mod tests {
             node: "t".into(),
             after: "nowhere".into(),
         }));
+    }
+
+    #[test]
+    fn a_schedule_fires_at_most_once_within_a_partition() {
+        let with = |schedule: &str, partitioning| {
+            let mut spec = spec(vec![asset("a", "a", &[])]);
+            spec.schedule = Some(schedule.into());
+            spec.partitioning = partitioning;
+            Graph::build(spec, &OperatorSet::builtin())
+        };
+        for (schedule, partitioning) in [
+            ("0 2 * * *", Partitioning::Daily),
+            ("0 2 * * 1-5", Partitioning::Daily),
+            ("0 * * * *", Partitioning::Hourly),
+            ("0 2,3 * * *", Partitioning::Hourly),
+            ("0 2 * * *", Partitioning::Hourly),
+        ] {
+            assert!(
+                with(schedule, partitioning).is_ok(),
+                "{schedule} {partitioning}"
+            );
+        }
+        // `0 0,12 * * *` fires at the epoch, the occurrence before the first
+        // one the check reads.
+        for (schedule, partitioning) in [
+            ("0 2,3 * * *", Partitioning::Daily),
+            ("0 0,12 * * *", Partitioning::Daily),
+            ("*/30 * * * *", Partitioning::Hourly),
+            ("0,1 2 * * *", Partitioning::Hourly),
+        ] {
+            assert_eq!(
+                with(schedule, partitioning),
+                Err(vec![Problem::ScheduleWithinPartition {
+                    expression: schedule.into(),
+                    partitioning,
+                }]),
+                "{schedule} {partitioning}"
+            );
+        }
+        assert_eq!(
+            with("0 2,3 * * *", Partitioning::Daily).unwrap_err()[0].to_string(),
+            "schedule `0 2,3 * * *` fires more than once within a `daily` partition"
+        );
+        assert_eq!(
+            with("0 2,3 * * *", Partitioning::Unpartitioned),
+            Err(vec![Problem::ScheduleWithoutPartition])
+        );
     }
 
     #[test]

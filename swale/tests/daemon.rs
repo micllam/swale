@@ -233,24 +233,24 @@ async fn a_new_graph_catches_up_firings_run_their_interval_start_and_downtime_is
     h.wait_for_complete("20260915").await;
 
     // An edit of the schedule applies on the running daemon. The entry of
-    // the new expression resumes at the watermark, so its firing of 12:00
-    // runs the partition of the interval start at 00:00.
+    // the new expression resumes at the watermark, so its firing of 00:00 on
+    // 17 September runs the partition of the interval start, 16 September.
     let edit = h
         .definitions
         .publish(&definition_text(
             "orders",
-            "0 */12 * * *",
+            "0 0 * * *",
             "orders_raw",
             "default",
         ))
         .await
         .unwrap();
-    h.clock.advance(Duration::from_secs(10 * 3600));
+    h.clock.advance(Duration::from_secs(22 * 3600));
     h.wait_for_complete("20260916").await;
     assert_eq!(h.graph_run("20260916").await.unwrap().definition, edit.hash);
 
-    // Four firings pass while the process is down, and two of them start a
-    // partition without a graph run.
+    // Two firings pass while the process is down, and each starts a partition
+    // without a graph run.
     stop.cancel();
     handle.await.unwrap().unwrap();
     h.clock.advance(Duration::from_secs(2 * 86_400));
@@ -620,10 +620,14 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
     // Another process reads the record through the status reader, once the
     // writer flushed it.
     let read = common::wait_until("no reader saw the request record", async || {
-        let reader =
-            StatusReader::open(h.objects.clone(), common::QUEUE_PATH, h.definitions.clone())
-                .await
-                .unwrap();
+        let reader = StatusReader::open(
+            h.objects.clone(),
+            "",
+            common::QUEUE_PATH,
+            h.definitions.clone(),
+        )
+        .await
+        .unwrap();
         let record = reader.request(&id(3)).await.unwrap();
         reader.close().await.unwrap();
         record
