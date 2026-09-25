@@ -39,6 +39,8 @@ pub(crate) async fn send_request(request: Request, args: RequestArgs) -> Command
         .manifest_poll_interval(Duration::from_secs(1));
     let reader = StatusReader::new(
         QueueReader::open_with_options(store.objects.clone(), &store.queue_path, options).await?,
+        store.objects.clone(),
+        &store.prefix,
         store.definitions(Arc::new(OperatorSet::builtin())),
     );
     let record = loop {

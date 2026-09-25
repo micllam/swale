@@ -82,15 +82,19 @@ async fn print_status(
         format_time(run.record.requested_at_ms),
         short_hash(&run.record.definition)
     );
-    let header = ["NODE", "POOL", "STATE", "RUN", "TERMINATED"];
+    let header = ["NODE", "POOL", "STATE", "INSTANCE", "RUN", "TERMINATED"];
     let mut rows = Vec::new();
     for node in &run.nodes {
         let record = node.record.as_ref();
+        let instance = node.instance.as_ref();
         rows.push([
             node.name.clone(),
             node.pool.clone(),
             node.state.to_string(),
-            record.map_or("-".to_string(), |r| r.run_id.clone()),
+            instance.map_or("-".to_string(), |i| i.state.to_string()),
+            instance
+                .map(|i| i.run_id.clone())
+                .unwrap_or_else(|| record.map_or("-".to_string(), |r| r.run_id.clone())),
             record.map_or("-".to_string(), |r| format_time(r.terminated_at_ms)),
         ]);
     }

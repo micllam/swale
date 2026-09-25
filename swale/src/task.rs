@@ -2,12 +2,13 @@
 //! the rerun count, which together form the run id and the `swale.` headers
 //! of the run.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use taquba_workflow::RunId;
 
+use crate::graph::{Graph, Node};
 use crate::partition::{InvalidPartition, Partition};
-use crate::records;
+use crate::records::{self, GraphRunRecord, NodeRecord, RecordStatus};
 
 /// Header with the graph name.
 pub const HEADER_GRAPH: &str = "swale.graph";
@@ -59,6 +60,30 @@ pub enum IdentityError {
 pub fn run_id(graph: &str, partition: &Partition, node: &str, rerun: u32) -> RunId {
     RunId::new(format!("{graph}-{partition}-{node}-r{rerun}"))
         .expect("graph and node names are bounded so that every run id is valid")
+}
+
+/// The run id of the task instance of `node` that does not have a current
+/// record in the graph run `run`, whose node records are `records` by node
+/// name. It is the run at count 0 of a node without a record, and the run at
+/// the next count after a failed, cancelled or superseded record. `None`
+/// after a current succeeded record.
+pub fn unrecorded_run_id(
+    graph: &Graph,
+    partition: &Partition,
+    run: &GraphRunRecord,
+    node: &Node,
+    records: &BTreeMap<String, NodeRecord>,
+) -> Option<RunId> {
+    let rerun = match records.get(node.name()) {
+        Some(record)
+            if record.status == RecordStatus::Succeeded && run.is_current(node.name(), record) =>
+        {
+            return None;
+        }
+        Some(record) => record.rerun + 1,
+        None => 0,
+    };
+    Some(run_id(graph.name(), partition, node.name(), rerun))
 }
 
 impl TaskIdentity {

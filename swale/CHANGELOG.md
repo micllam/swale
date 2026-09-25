@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `swale status <graph> <partition>` shows the task instance of a node that
+  the runtime of its pool has, `pending`, `running` or `cancelling`, with its
+  run id, and `NodeStatus` records it in `instance`. A caller of
+  `StatusReader::open` or `StatusReader::new` passes the store prefix, within
+  which the pools write their memos, and `StatusReader::new` also takes the
+  object store.
+
 ### Changed
 
 - A schedule that fires more than once within a partition, such as

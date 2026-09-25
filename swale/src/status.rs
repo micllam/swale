@@ -8,8 +8,10 @@
 //!
 //! The state of a node ([`NodeState`]) is derived from the records alone, by
 //! the readiness rule of [`crate::readiness`]. A node whose record a rerun
-//! superseded has the state of a node without a record and keeps the record
-//! in its status.
+//! superseded has the state of a node without a record and keeps the record in
+//! its status. The task instance of a node that is not recorded as succeeded
+//! ([`TaskInstance`]) is read from the runtime state of the node's pool through
+//! a [`WorkflowView`], at the run id of [`crate::task::unrecorded_run_id`].
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,15 +19,18 @@ use std::sync::Arc;
 use serde::Serialize;
 use taquba::object_store::ObjectStore;
 use taquba::{JobRecord, QueueReader, QueueStats, ReaderMode, ReaderOptions};
+use taquba_workflow::{MemoStore, RunState, WorkflowView};
 
 use crate::definition_store::{DefinitionError, DefinitionStore};
 use crate::partition::Partition;
+use crate::pools::memo_prefix;
 use crate::readiness::{NodeState, current_records, node_states};
 use crate::records::{
     self, Entry, GRAPH_RUNS_PREFIX, GRAPHS_PREFIX, GraphRecord, GraphRunRecord, GraphRunState,
     NodeRecord, ReadError, RecordError, RequestRecord,
 };
 use crate::request::RequestId;
+use crate::task;
 
 /// A failure of a status read.
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +38,9 @@ pub enum Error {
     /// The reader failed.
     #[error(transparent)]
     Queue(#[from] taquba::Error),
+    /// The workflow view failed.
+    #[error(transparent)]
+    Workflow(#[from] taquba_workflow::Error),
     /// The definition store failed.
     #[error(transparent)]
     Definition(#[from] DefinitionError),
@@ -88,6 +96,44 @@ pub struct GraphStatus {
     pub latest: Option<RunSummary>,
 }
 
+/// The state of a task instance that the runtime of its pool has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceState {
+    /// The task instance waits in the queue of its pool, or for a retry.
+    Pending,
+    /// A worker of the pool runs the task instance.
+    Running,
+    /// The graph run is cancelled, and the task instance did not terminate.
+    Cancelling,
+}
+
+impl InstanceState {
+    /// The lowercase name, as in the JSON form.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InstanceState::Pending => "pending",
+            InstanceState::Running => "running",
+            InstanceState::Cancelling => "cancelling",
+        }
+    }
+}
+
+impl std::fmt::Display for InstanceState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The task instance of a node that the runtime of its pool has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TaskInstance {
+    /// The run id.
+    pub run_id: String,
+    /// The state.
+    pub state: InstanceState,
+}
+
 /// A node of a graph run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NodeStatus {
@@ -99,6 +145,9 @@ pub struct NodeStatus {
     pub state: NodeState,
     /// The node record, current or superseded by a rerun.
     pub record: Option<NodeRecord>,
+    /// The task instance at the run id of [`task::unrecorded_run_id`], while
+    /// the runtime of the pool has it as pending, running or cancelling.
+    pub instance: Option<TaskInstance>,
 }
 
 /// A graph run with its nodes.
@@ -117,29 +166,49 @@ pub struct GraphRunStatus {
 /// A read-only view of a deployment.
 pub struct StatusReader {
     reader: QueueReader,
+    store: Arc<dyn ObjectStore>,
+    store_prefix: String,
     definitions: Arc<DefinitionStore>,
 }
 
 impl StatusReader {
-    /// Opens a reader of the queue at `queue_path` of `store`. The reader
-    /// follows the latest state without a checkpoint, so it does not write
-    /// to the store.
+    /// Opens a reader of the queue at `queue_path` of `store`, whose pools
+    /// write their memos within `store_prefix`. The reader follows the latest
+    /// state without a checkpoint, so it does not write to the store.
     pub async fn open(
         store: Arc<dyn ObjectStore>,
+        store_prefix: &str,
         queue_path: &str,
         definitions: Arc<DefinitionStore>,
     ) -> Result<Self, Error> {
         let options = ReaderOptions::default().mode(ReaderMode::FollowLatest);
-        let reader = QueueReader::open_with_options(store, queue_path, options).await?;
-        Ok(StatusReader::new(reader, definitions))
+        let reader = QueueReader::open_with_options(store.clone(), queue_path, options).await?;
+        Ok(StatusReader::new(reader, store, store_prefix, definitions))
     }
 
     /// A view through `reader`, for a caller that sets the reader options.
-    pub fn new(reader: QueueReader, definitions: Arc<DefinitionStore>) -> Self {
+    /// The pools of the store write their memos within `store_prefix`.
+    pub fn new(
+        reader: QueueReader,
+        store: Arc<dyn ObjectStore>,
+        store_prefix: &str,
+        definitions: Arc<DefinitionStore>,
+    ) -> Self {
         StatusReader {
             reader,
+            store,
+            store_prefix: store_prefix.to_string(),
             definitions,
         }
+    }
+
+    /// The workflow view of the pool `pool`, over the reader's view and the
+    /// memos of the pool.
+    fn pool_view(&self, pool: &str) -> WorkflowView {
+        WorkflowView::new(
+            self.reader.view().clone(),
+            MemoStore::new(self.store.clone(), memo_prefix(&self.store_prefix, pool)),
+        )
     }
 
     /// Every graph with a graph record or a graph run, by name.
@@ -189,7 +258,8 @@ impl StatusReader {
     }
 
     /// The graph run of `graph` for `partition` with the state of every node
-    /// of the definition it records, or `None` without a graph run record.
+    /// of the definition it records and the task instance of every node that
+    /// the runtime of its pool has, or `None` without a graph run record.
     pub async fn run(
         &self,
         graph: &str,
@@ -213,16 +283,32 @@ impl StatusReader {
             }
         }
         let states = node_states(&definition, &current_records(&record, &node_records));
-        let nodes = definition
-            .nodes()
-            .iter()
-            .map(|node| NodeStatus {
+        let mut views: BTreeMap<&str, WorkflowView> = BTreeMap::new();
+        let mut nodes = Vec::with_capacity(definition.nodes().len());
+        for node in definition.nodes() {
+            let instance =
+                match task::unrecorded_run_id(&definition, partition, &record, node, &node_records)
+                {
+                    Some(run_id) => views
+                        .entry(node.pool())
+                        .or_insert_with(|| self.pool_view(node.pool()))
+                        .status(&run_id)
+                        .await?
+                        .and_then(|status| instance_state(&status.state))
+                        .map(|state| TaskInstance {
+                            run_id: run_id.to_string(),
+                            state,
+                        }),
+                    None => None,
+                };
+            nodes.push(NodeStatus {
                 name: node.name().to_string(),
                 pool: node.pool().to_string(),
                 state: states[node.name()],
                 record: node_records.remove(node.name()),
-            })
-            .collect();
+                instance,
+            });
+        }
         Ok(Some(GraphRunStatus {
             graph: graph.to_string(),
             partition: partition.clone(),
@@ -276,6 +362,17 @@ impl StatusReader {
     }
 }
 
+/// The state of a task instance from the state of its run, or `None` for a
+/// terminated run.
+fn instance_state(state: &RunState) -> Option<InstanceState> {
+    match state {
+        RunState::Pending => Some(InstanceState::Pending),
+        RunState::Running => Some(InstanceState::Running),
+        RunState::Cancelling => Some(InstanceState::Cancelling),
+        RunState::Terminated(_) => None,
+    }
+}
+
 fn graph_entry<'a>(
     graphs: &'a mut BTreeMap<String, GraphStatus>,
     name: &str,
@@ -288,4 +385,36 @@ fn graph_entry<'a>(
             runs: RunCounts::default(),
             latest: None,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use taquba_workflow::{RunTermination, TerminalStatus};
+
+    use super::*;
+
+    #[test]
+    fn a_terminated_run_is_not_an_instance() {
+        assert_eq!(
+            instance_state(&RunState::Pending),
+            Some(InstanceState::Pending)
+        );
+        assert_eq!(
+            instance_state(&RunState::Running),
+            Some(InstanceState::Running)
+        );
+        assert_eq!(
+            instance_state(&RunState::Cancelling),
+            Some(InstanceState::Cancelling)
+        );
+        let terminated = RunTermination {
+            status: TerminalStatus::Succeeded,
+            error: None,
+            error_kind: None,
+            final_step: 0,
+            terminated_at_ms: 0,
+        };
+        assert_eq!(instance_state(&RunState::Terminated(terminated)), None);
+        assert_eq!(InstanceState::Cancelling.to_string(), "cancelling");
+    }
 }

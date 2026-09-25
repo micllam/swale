@@ -187,6 +187,7 @@ async fn open_status(store: StoreArg) -> Result<StatusReader, Box<dyn std::error
     let store = open_store(store)?;
     Ok(StatusReader::open(
         store.objects.clone(),
+        &store.prefix,
         &store.queue_path,
         store.definitions(Arc::new(OperatorSet::builtin())),
     )

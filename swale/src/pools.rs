@@ -24,6 +24,12 @@ use crate::store::store_path;
 /// The runtime of a pool.
 pub type PoolRuntime = WorkflowRuntime<Dispatch, RecordHook>;
 
+/// The path of the memos of the pool `pool`: `memos/{pool}` within
+/// `store_prefix`.
+pub(crate) fn memo_prefix(store_prefix: &str, pool: &str) -> String {
+    store_path(store_prefix, &format!("memos/{pool}"))
+}
+
 /// One [`WorkflowRuntime`] per pool, all over one queue and one store.
 pub struct Pools {
     runtimes: HashMap<String, PoolRuntime>,
@@ -85,7 +91,7 @@ impl PoolsBuilder {
                     self.hook.clone(),
                 )
                 .queue_name(format!("swale-pool-{name}"))
-                .memo_prefix(store_path(&self.store_prefix, &format!("memos/{name}")))
+                .memo_prefix(memo_prefix(&self.store_prefix, &name))
                 .max_concurrent_steps(concurrency)
                 .poll_interval(self.poll_interval)
                 .memo_retention(self.memo_retention)

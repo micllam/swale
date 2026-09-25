@@ -130,6 +130,8 @@
 //! the graph, and `swale status <graph> <partition>` lists the nodes of one
 //! graph run. A node without a record is `ready`, `waiting` or `blocked`. A
 //! blocked node does not run until a rerun changes the record of an upstream.
+//! The listing shows the task instance of a node that the runtime of its pool
+//! has, `pending`, `running` or `cancelling`, with its run id.
 //!
 //! `swale queues` lists the job counts of every queue, and `swale queues
 //! <queue>` lists the dead jobs of one queue. Both commands only read from the
@@ -216,6 +218,9 @@ pub use records::{
 };
 pub use request::{Request, RequestId, RequestStore};
 pub use scheduler::{RerunOutcome, Scheduler, SchedulerOptions, StartOutcome, TRIGGERS_QUEUE};
-pub use status::{GraphRunStatus, GraphStatus, NodeStatus, RunCounts, RunSummary, StatusReader};
+pub use status::{
+    GraphRunStatus, GraphStatus, InstanceState, NodeStatus, RunCounts, RunSummary, StatusReader,
+    TaskInstance,
+};
 pub use task::TaskIdentity;
 pub use template::Template;

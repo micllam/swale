@@ -7,8 +7,8 @@ use std::time::Duration;
 use swale::JsonBytes;
 use swale::records::{GraphRunState, graph_key};
 use swale::{
-    DefinitionStore, GraphRecord, NodeState, OperatorSet, Partition, Pools, RecordHook, RunCounts,
-    Scheduler, SchedulerOptions, StatusReader,
+    DefinitionStore, GraphRecord, GraphRunStatus, InstanceState, NodeState, OperatorSet, Partition,
+    Pools, RecordHook, RunCounts, Scheduler, SchedulerOptions, StatusReader, TaskInstance,
 };
 use taquba::object_store::ObjectStore;
 use taquba::{MockClock, Queue};
@@ -59,6 +59,19 @@ operator = "subprocess"
 argv = ["sh", "-c", "cat >/dev/null; printf '{}'"]
 "#;
 
+/// `flaky` fails at rerun count 0 and runs for a minute at every later count.
+const FLAKY: &str = r#"
+[graph]
+name = "orders"
+partition = "daily"
+
+[[node]]
+name = "flaky"
+operator = "shell"
+[node.params]
+command = 'case "$SWALE_RUN_ID" in *-r0) exit 3;; *) sleep 60;; esac'
+"#;
+
 struct Harness {
     store: Arc<dyn ObjectStore>,
     queue: Arc<Queue>,
@@ -69,11 +82,11 @@ struct Harness {
 }
 
 impl Harness {
-    async fn start(spawn_workers: bool) -> Harness {
+    async fn start(definition: &str, spawn_workers: bool) -> Harness {
         let (store, queue) = common::open_queue(MockClock::new(START_MS)).await;
         let operators = Arc::new(OperatorSet::builtin());
         let definitions = Arc::new(DefinitionStore::new(store.clone(), "", operators.clone()));
-        let (hash, _) = definitions.put(DEFINITION).await.unwrap();
+        let (hash, _) = definitions.put(definition).await.unwrap();
         let hook = RecordHook::new(queue.clock());
         let pools = Arc::new(
             Pools::builder(queue.clone(), store.clone(), operators, hook)
@@ -116,6 +129,7 @@ impl Harness {
     async fn reader(&self) -> StatusReader {
         StatusReader::open(
             self.store.clone(),
+            "",
             common::QUEUE_PATH,
             self.definitions.clone(),
         )
@@ -140,6 +154,19 @@ impl Harness {
         )
         .await
     }
+
+    /// The status of the graph run once a reader's view satisfies `accept`.
+    /// A reader sees a write after the writer flushes it, so the open repeats
+    /// until then.
+    async fn run_when(&self, accept: impl Fn(&GraphRunStatus) -> bool) -> GraphRunStatus {
+        common::wait_until("no reader saw the expected graph run", async || {
+            let reader = self.reader().await;
+            let run = reader.run("orders", &Harness::partition()).await.unwrap();
+            reader.close().await.unwrap();
+            run.filter(&accept)
+        })
+        .await
+    }
 }
 
 impl Drop for Harness {
@@ -157,7 +184,7 @@ fn states(run: &swale::GraphRunStatus) -> Vec<(&str, NodeState)> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_run_reads_with_its_counts_its_blocked_node_and_its_dead_job() {
-    let h = Harness::start(true).await;
+    let h = Harness::start(DEFINITION, true).await;
     let adopted = GraphRecord {
         definition: h.hash.clone(),
         adopted_at_ms: START_MS,
@@ -218,6 +245,7 @@ async fn a_failed_run_reads_with_its_counts_its_blocked_node_and_its_dead_job() 
     );
     assert_eq!(run.nodes[2].pool, "warehouse");
     assert_eq!(run.nodes[2].record, None);
+    assert!(run.nodes.iter().all(|node| node.instance.is_none()));
     let absent = Partition::new("20260916").unwrap();
     assert_eq!(reader.run("orders", &absent).await.unwrap(), None);
 
@@ -242,8 +270,8 @@ async fn a_failed_run_reads_with_its_counts_its_blocked_node_and_its_dead_job() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_active_run_without_workers_has_a_ready_root_and_waiting_downstreams() {
-    let h = Harness::start(false).await;
+async fn an_active_run_without_workers_has_a_pending_root_instance_and_waiting_downstreams() {
+    let h = Harness::start(DEFINITION, false).await;
     h.scheduler
         .start_run(&h.hash, &Harness::partition())
         .await
@@ -253,11 +281,8 @@ async fn an_active_run_without_workers_has_a_ready_root_and_waiting_downstreams(
     let graphs = reader.graphs().await.unwrap();
     assert_eq!(graphs[0].adopted, None);
     assert_eq!(graphs[0].runs.active, 1);
-    let run = reader
-        .run("orders", &Harness::partition())
-        .await
-        .unwrap()
-        .unwrap();
+    reader.close().await.unwrap();
+    let run = h.run_when(|run| run.nodes[0].instance.is_some()).await;
     assert_eq!(run.record.state, GraphRunState::Active);
     assert_eq!(
         states(&run),
@@ -268,5 +293,50 @@ async fn an_active_run_without_workers_has_a_ready_root_and_waiting_downstreams(
             ("notify", NodeState::Waiting),
         ]
     );
-    reader.close().await.unwrap();
+    assert_eq!(
+        run.nodes[0].instance,
+        Some(TaskInstance {
+            run_id: "orders-20260915-extract-r0".into(),
+            state: InstanceState::Pending,
+        })
+    );
+    assert!(run.nodes[1..].iter().all(|node| node.instance.is_none()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_node_with_a_running_rerun_reads_its_record_and_its_instance() {
+    let h = Harness::start(FLAKY, true).await;
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+    h.reader_at(GraphRunState::Failed)
+        .await
+        .close()
+        .await
+        .unwrap();
+    h.scheduler
+        .rerun("orders", &Harness::partition(), "flaky")
+        .await
+        .unwrap();
+
+    let run = h
+        .run_when(|run| {
+            run.nodes[0]
+                .instance
+                .as_ref()
+                .is_some_and(|instance| instance.state == InstanceState::Running)
+        })
+        .await;
+    assert_eq!(run.record.state, GraphRunState::Active);
+    assert_eq!(states(&run), [("flaky", NodeState::Failed)]);
+    let record = run.nodes[0].record.as_ref().unwrap();
+    assert_eq!(record.run_id, "orders-20260915-flaky-r0");
+    assert_eq!(
+        run.nodes[0].instance,
+        Some(TaskInstance {
+            run_id: "orders-20260915-flaky-r1".into(),
+            state: InstanceState::Running,
+        })
+    );
 }

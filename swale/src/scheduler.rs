@@ -742,7 +742,7 @@ impl Scheduler {
         // A blocked node can have an active run at count 0 from the time it was
         // ready, and a failed or cancelled node can have an active rerun.
         for node in graph.nodes() {
-            if let Some(run_id) = unrecorded_run_id(graph, partition, run, node, records)
+            if let Some(run_id) = task::unrecorded_run_id(graph, partition, run, node, records)
                 && self.run_is_active(node, &run_id).await?
             {
                 return Ok(false);
@@ -818,7 +818,8 @@ impl Scheduler {
         let records = self.node_records(graph, partition).await?;
         let mut cancelled = 0;
         for node in graph.nodes() {
-            let Some(run_id) = unrecorded_run_id(graph, partition, run, node, &records) else {
+            let Some(run_id) = task::unrecorded_run_id(graph, partition, run, node, &records)
+            else {
                 continue;
             };
             let Some(runtime) = self.pools.runtime(node.pool()) else {
@@ -841,29 +842,6 @@ fn upstream_records(
         .iter()
         .filter_map(|name| Some((name.clone(), records.get(name)?.clone())))
         .collect()
-}
-
-/// The run id of the task instance of `node` that does not have a current
-/// record. It is the run at count 0 of a node without a record, and the run
-/// at the next count after a failed, cancelled or superseded record. `None`
-/// after a current succeeded record.
-fn unrecorded_run_id(
-    graph: &Graph,
-    partition: &Partition,
-    run: &GraphRunRecord,
-    node: &Node,
-    records: &BTreeMap<String, NodeRecord>,
-) -> Option<RunId> {
-    let rerun = match records.get(node.name()) {
-        Some(record)
-            if record.status == RecordStatus::Succeeded && run.is_current(node.name(), record) =>
-        {
-            return None;
-        }
-        Some(record) => record.rerun + 1,
-        None => 0,
-    };
-    Some(task::run_id(graph.name(), partition, node.name(), rerun))
 }
 
 /// The identity of the task instance of `node` at the rerun count `rerun`.
