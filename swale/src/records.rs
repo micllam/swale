@@ -21,7 +21,7 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use taquba::{ExpiryIndex, QueueView};
+use taquba::{ExpiryIndex, KvRange, QueueView};
 use taquba_workflow::TerminalStatus;
 
 use crate::graph::Node;
@@ -396,14 +396,16 @@ pub struct Entry<T> {
     pub record: T,
 }
 
-/// Every record with `prefix`, in key order. A value that is not a `T` is
-/// logged and skipped, so one malformed record does not end a listing.
+/// Every record with `prefix` whose key is within `range`, in key order. A
+/// value that is not a `T` is logged and skipped, so one malformed record
+/// does not end a listing.
 pub async fn scan<T: JsonBytes>(
     view: &QueueView,
     prefix: &[u8],
+    range: impl KvRange,
 ) -> Result<Vec<Entry<T>>, taquba::Error> {
     let mut records = Vec::new();
-    let mut entries = pin!(view.kv_entries(prefix, .., PAGE));
+    let mut entries = pin!(view.kv_entries(prefix, range, PAGE));
     while let Some((key, bytes)) = entries.try_next().await? {
         match parse::<T>(&key, &bytes) {
             Ok(record) => records.push(Entry { key, bytes, record }),

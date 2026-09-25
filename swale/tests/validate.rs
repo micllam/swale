@@ -305,6 +305,19 @@ fn status_and_queues_commands_print_a_failed_run_and_never_create_a_store() {
         "{stdout}"
     );
     assert!(stdout.contains("\nnone       failed  "), "{stdout}");
+    let (code, from_none) = read_command(&dir, "store", &["status", "local", "--from", "none"]);
+    assert_eq!(code, Some(0), "{from_none}");
+    assert_eq!(from_none, stdout);
+    let output = swale(
+        &["status", "local", "--from", "zzz"],
+        Some(&dir.join("store")),
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("graph `local` does not have a graph run at or after `zzz`"),
+        "{stderr}"
+    );
 
     let (code, stdout) = read_command(&dir, "store", &["status", "local", "none"]);
     assert_eq!(code, Some(0), "{stdout}");

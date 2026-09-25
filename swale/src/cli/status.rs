@@ -10,10 +10,18 @@ pub(crate) async fn status(
     store: StoreArg,
     graph: Option<String>,
     partition: Option<Partition>,
+    from: Option<Partition>,
     limit: usize,
 ) -> CommandResult {
     with_reader(store, async |reader| {
-        print_status(reader, graph.as_deref(), partition.as_ref(), limit).await
+        print_status(
+            reader,
+            graph.as_deref(),
+            partition.as_ref(),
+            from.as_ref(),
+            limit,
+        )
+        .await
     })
     .await
 }
@@ -22,6 +30,7 @@ async fn print_status(
     reader: &StatusReader,
     graph: Option<&str>,
     partition: Option<&Partition>,
+    from: Option<&Partition>,
     limit: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(graph) = graph else {
@@ -54,9 +63,15 @@ async fn print_status(
         return Ok(());
     };
     let Some(partition) = partition else {
-        let runs = reader.runs(graph).await?;
+        let runs = reader.runs(graph, from).await?;
         if runs.is_empty() {
-            return Err(format!("graph `{graph}` does not have a graph run").into());
+            return Err(match from {
+                Some(from) => {
+                    format!("graph `{graph}` does not have a graph run at or after `{from}`")
+                }
+                None => format!("graph `{graph}` does not have a graph run"),
+            }
+            .into());
         }
         let header = ["PARTITION", "STATE", "REQUESTED", "DEFINITION"];
         let mut rows = Vec::new();

@@ -144,7 +144,7 @@ impl Harness {
             &format!("no reader saw the graph run in {state:?}"),
             async || {
                 let reader = self.reader().await;
-                let runs = reader.runs("orders").await.unwrap();
+                let runs = reader.runs("orders", None).await.unwrap();
                 if runs.first().is_some_and(|run| run.record.state == state) {
                     return Some(reader);
                 }
@@ -213,11 +213,11 @@ async fn a_failed_run_reads_with_its_counts_its_blocked_node_and_its_dead_job() 
     let latest = graphs[0].latest.as_ref().unwrap();
     assert_eq!(latest.partition, Harness::partition());
 
-    let runs = reader.runs("orders").await.unwrap();
+    let runs = reader.runs("orders", None).await.unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].record.state, GraphRunState::Failed);
     assert_eq!(runs[0].record.requested_at_ms, START_MS);
-    assert!(reader.runs("order").await.unwrap().is_empty());
+    assert!(reader.runs("order", None).await.unwrap().is_empty());
 
     let run = reader
         .run("orders", &Harness::partition())
@@ -301,6 +301,35 @@ async fn an_active_run_without_workers_has_a_pending_root_instance_and_waiting_d
         })
     );
     assert!(run.nodes[1..].iter().all(|node| node.instance.is_none()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runs_list_from_a_partition_onward() {
+    let h = Harness::start(DEFINITION, false).await;
+    for partition in ["20260914", "20260915", "20260916"] {
+        h.scheduler
+            .start_run(&h.hash, &Partition::new(partition).unwrap())
+            .await
+            .unwrap();
+    }
+
+    let reader = h.reader().await;
+    let partitions = async |from: Option<&str>| {
+        let from = from.map(|p| Partition::new(p).unwrap());
+        reader
+            .runs("orders", from.as_ref())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|run| run.partition.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(partitions(None).await, ["20260914", "20260915", "20260916"]);
+    assert_eq!(partitions(Some("20260915")).await, ["20260915", "20260916"]);
+    // A start partition without a graph run begins the listing after it.
+    assert_eq!(partitions(Some("20260915T12")).await, ["20260916"]);
+    assert!(partitions(Some("20260917")).await.is_empty());
+    reader.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

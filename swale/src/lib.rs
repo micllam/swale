@@ -127,8 +127,9 @@
 //!
 //! `swale status` lists the graphs of a store with the count of their graph
 //! runs in each state. `swale status <graph>` lists the latest graph runs of
-//! the graph, and `swale status <graph> <partition>` lists the nodes of one
-//! graph run. A node without a record is `ready`, `waiting` or `blocked`. A
+//! the graph, from the partition of `--from` when given, and `swale status
+//! <graph> <partition>` lists the nodes of one graph run. A node without a
+//! record is `ready`, `waiting` or `blocked`. A
 //! blocked node does not run until a rerun changes the record of an upstream.
 //! The listing shows the task instance of a node that the runtime of its pool
 //! has, `pending`, `running` or `cancelling`, with its run id.

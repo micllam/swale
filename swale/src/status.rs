@@ -14,6 +14,7 @@
 //! a [`WorkflowView`], at the run id of [`crate::task::unrecorded_run_id`].
 
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -215,7 +216,7 @@ impl StatusReader {
     pub async fn graphs(&self) -> Result<Vec<GraphStatus>, Error> {
         let mut graphs: BTreeMap<String, GraphStatus> = BTreeMap::new();
         let adopted: Vec<Entry<GraphRecord>> =
-            records::scan(self.reader.view(), GRAPHS_PREFIX.as_bytes()).await?;
+            records::scan(self.reader.view(), GRAPHS_PREFIX.as_bytes(), ..).await?;
         for Entry { key, record, .. } in adopted {
             let Some(name) = records::parse_graph_key(&key) else {
                 continue;
@@ -223,7 +224,7 @@ impl StatusReader {
             graph_entry(&mut graphs, &name).adopted = Some(record);
         }
         let runs: Vec<Entry<GraphRunRecord>> =
-            records::scan(self.reader.view(), GRAPH_RUNS_PREFIX.as_bytes()).await?;
+            records::scan(self.reader.view(), GRAPH_RUNS_PREFIX.as_bytes(), ..).await?;
         for Entry { key, record, .. } in runs {
             let Some((name, partition)) = records::parse_graph_run_key(&key) else {
                 continue;
@@ -242,12 +243,22 @@ impl StatusReader {
         Ok(graphs.into_values().collect())
     }
 
-    /// The graph runs of `graph`, in partition order.
-    pub async fn runs(&self, graph: &str) -> Result<Vec<RunSummary>, Error> {
+    /// The graph runs of `graph` in partition order, at or after the partition
+    /// `from` when given. The read starts at the key of `from`.
+    pub async fn runs(
+        &self,
+        graph: &str,
+        from: Option<&Partition>,
+    ) -> Result<Vec<RunSummary>, Error> {
         let prefix = format!("{GRAPH_RUNS_PREFIX}{graph}/");
+        let start = from.map(|partition| records::graph_run_key(graph, partition));
+        let range = (
+            start.map_or(Bound::Unbounded, Bound::Included),
+            Bound::Unbounded,
+        );
         let mut runs = Vec::new();
         let entries: Vec<Entry<GraphRunRecord>> =
-            records::scan(self.reader.view(), prefix.as_bytes()).await?;
+            records::scan(self.reader.view(), prefix.as_bytes(), range).await?;
         for Entry { key, record, .. } in entries {
             let Some((_, partition)) = records::parse_graph_run_key(&key) else {
                 continue;

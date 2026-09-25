@@ -501,7 +501,7 @@ impl Scheduler {
     pub async fn reconcile(&self) -> Result<ReconcileReport, Error> {
         let mut report = ReconcileReport::default();
         let runs: Vec<Entry<GraphRunRecord>> =
-            records::scan(self.queue.view(), records::GRAPH_RUNS_PREFIX.as_bytes()).await?;
+            records::scan(self.queue.view(), records::GRAPH_RUNS_PREFIX.as_bytes(), ..).await?;
         for Entry {
             key,
             bytes,

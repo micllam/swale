@@ -131,7 +131,11 @@ enum Command {
         partition: Option<Partition>,
         #[command(flatten)]
         store: StoreArg,
-        /// The graph runs listed, the latest partitions of the graph.
+        /// The first partition listed. Without it, the listing starts at the
+        /// first graph run of the graph.
+        #[arg(long, value_parser = parse_partition_arg)]
+        from: Option<Partition>,
+        /// The graph runs listed, the latest partitions at or after `from`.
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
@@ -204,8 +208,9 @@ pub(crate) async fn main() -> ExitCode {
             graph,
             partition,
             store,
+            from,
             limit,
-        } => status::status(store, graph, partition, limit).await,
+        } => status::status(store, graph, partition, from, limit).await,
         Command::Queues {
             queue,
             store,
