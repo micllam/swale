@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Problem::ScheduleWithinPartition`. Such a graph changes its schedule or its
   partition.
 
+### Fixed
+
+- The failure message of the `object_exists` operator includes a fractional
+  `timeout` in full, such as `within 3600.5s`. 0.2.0 truncated `timeout` to
+  whole seconds in the message.
+
 ## [0.2.0] - 2026-09-25
 
 ### Added

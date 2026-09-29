@@ -114,9 +114,8 @@ impl Operator for ObjectExists {
             }))),
             Err(object_store::Error::NotFound { .. }) if task.now_ms >= deadline_ms => {
                 Ok(Outcome::Failed(format!(
-                    "no object at `{}` within {}s",
-                    params.url,
-                    params.timeout.as_secs()
+                    "no object at `{}` within {:?}",
+                    params.url, params.timeout
                 )))
             }
             Err(object_store::Error::NotFound { .. }) => Ok(Outcome::Continue {
@@ -183,7 +182,7 @@ mod tests {
                 ObjectExistsParams {
                     url: url.into(),
                     interval: Duration::from_secs(30),
-                    timeout: Duration::from_secs(3600),
+                    timeout: Duration::from_millis(3_600_500),
                 },
             )
             .await
@@ -207,7 +206,7 @@ mod tests {
         let url = format!("file://{}/orders.parquet", dir.display());
         let operator = ObjectExists::default();
         let outcome = run(&operator, &url, None, 1_000).await.unwrap();
-        let deadline = serde_json::json!({"deadline_ms": 1_000 + 3_600_000});
+        let deadline = serde_json::json!({"deadline_ms": 1_000 + 3_600_500});
         assert_eq!(
             outcome,
             Outcome::Continue {
@@ -226,10 +225,10 @@ mod tests {
             }
         );
         assert_eq!(
-            run(&operator, &url, Some(deadline), 3_601_000)
+            run(&operator, &url, Some(deadline), 3_601_500)
                 .await
                 .unwrap(),
-            Outcome::Failed(format!("no object at `{url}` within 3600s"))
+            Outcome::Failed(format!("no object at `{url}` within 3600.5s"))
         );
         // The three polls opened the store of the scheme and host once.
         assert_eq!(
