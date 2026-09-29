@@ -1,15 +1,20 @@
-//! The `shell` operator: runs a command line with `sh -c` and reads its
-//! output JSON from stdout.
+//! The `shell` operator: runs a command line with `sh -c` and reads its output
+//! JSON from stdout.
 //!
-//! The environment of the command contains the identity of the task
-//! instance (`SWALE_RUN_ID`, `SWALE_GRAPH`, `SWALE_PARTITION`, `SWALE_NODE`
-//! and `SWALE_ATTEMPT`), the outputs of the upstream nodes as JSON in
-//! `SWALE_INPUTS`, and the `env` parameters. Stdin is closed. The exit code
-//! protocol is that of the `subprocess` operator ([`super::subprocess`]):
-//! 0 is success with stdout as the output, 75 is a transient error and any
-//! other code is a permanent error.
+//! The environment of the command contains the identity of the task instance
+//! (`SWALE_RUN_ID`, `SWALE_GRAPH`, `SWALE_PARTITION`, `SWALE_NODE` and
+//! `SWALE_ATTEMPT`), the outputs of the upstream nodes as JSON in
+//! `SWALE_INPUTS`, and the `env` parameters. Stdin is closed. The command
+//! follows the exit code protocol of the `subprocess` operator
+//! ([`super::subprocess`]): 0 is success with stdout as the output, 75 is a
+//! transient error and any other code is a permanent error.
+//!
+//! The operator kills the command when its run time exceeds the `timeout`
+//! parameter, and the attempt fails with a transient error. The operator kills
+//! only the `sh` process, and a process that `sh` started can continue to run.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use serde::Deserialize;
 use taquba_workflow::StepError;
@@ -17,6 +22,7 @@ use tokio::process::Command;
 
 use super::subprocess::run_program;
 use super::{Lease, Operator, Outcome, Task};
+use crate::duration;
 
 /// Parameters of the `shell` operator: a command line and its environment.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -27,6 +33,9 @@ pub struct ShellParams {
     /// Environment variables set for the command.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// The time the command can run.
+    #[serde(default, deserialize_with = "duration::deserialize_option")]
+    pub timeout: Option<Duration>,
 }
 
 /// The `shell` operator.
@@ -63,7 +72,7 @@ impl Operator for Shell {
             .env("SWALE_ATTEMPT", task.step.attempts.to_string())
             .env("SWALE_INPUTS", inputs)
             .envs(&params.env);
-        run_program(task, command, None, self.lease).await
+        run_program(task, command, None, params.timeout, self.lease).await
     }
 }
 
@@ -75,7 +84,11 @@ mod tests {
     use serde_json::Value;
     use taquba_workflow::{Step, StepErrorKind};
 
-    async fn run(command: &str, env: &[(&str, &str)]) -> Result<Outcome, StepError> {
+    async fn run(
+        command: &str,
+        env: &[(&str, &str)],
+        timeout: Option<Duration>,
+    ) -> Result<Outcome, StepError> {
         let step = Step::detached(Vec::new());
         let identity = TaskIdentity {
             graph: "g".into(),
@@ -104,6 +117,7 @@ mod tests {
                         .iter()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .collect(),
+                    timeout,
                 },
             )
             .await
@@ -114,6 +128,7 @@ mod tests {
         let outcome = run(
             r#"printf '{"id": "%s", "graph": "%s", "partition": "%s", "node": "%s", "attempt": %s, "inputs": %s, "extra": "%s"}' "$SWALE_RUN_ID" "$SWALE_GRAPH" "$SWALE_PARTITION" "$SWALE_NODE" "$SWALE_ATTEMPT" "$SWALE_INPUTS" "$EXTRA""#,
             &[("EXTRA", "x")],
+            None,
         )
         .await
         .unwrap();
@@ -129,20 +144,31 @@ mod tests {
         assert_eq!(value["extra"], "x");
     }
 
-    #[tokio::test]
-    async fn stdin_is_closed_and_the_exit_code_protocol_applies() {
+    #[tokio::test(start_paused = true)]
+    async fn stdin_is_closed_and_the_exit_code_protocol_and_the_timeout_apply() {
         // A read of stdin ends at once.
         assert_eq!(
-            run("cat; printf '{\"n\": 1}'", &[]).await.unwrap(),
+            run("cat; printf '{\"n\": 1}'", &[], None).await.unwrap(),
             Outcome::Succeeded(serde_json::json!({"n": 1}))
         );
-        let err = run("echo busy >&2; exit 75", &[]).await.unwrap_err();
+        let err = run("echo busy >&2; exit 75", &[], None).await.unwrap_err();
         assert_eq!(err.kind, StepErrorKind::Transient);
         assert!(err.message.contains("busy"), "{}", err.message);
-        let err = run("exit 3", &[]).await.unwrap_err();
+        let err = run("exit 3", &[], None).await.unwrap_err();
         assert_eq!(err.kind, StepErrorKind::Permanent);
         assert!(
             err.message.contains("`sh` exited with 3"),
+            "{}",
+            err.message
+        );
+        // The runtime advances the paused clock to the timeout once the test
+        // waits only on the command.
+        let err = run("sleep 30", &[], Some(Duration::from_millis(1500)))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, StepErrorKind::Transient);
+        assert!(
+            err.message.contains("`sh` did not exit within 1.5s"),
             "{}",
             err.message
         );

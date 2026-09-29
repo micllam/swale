@@ -50,3 +50,6 @@ bytes = { workspace = true }
 reqwest = { workspace = true }
 futures-util = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

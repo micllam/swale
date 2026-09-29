@@ -72,11 +72,9 @@
 //!   is held between polls, and the output is the URL, the size and the
 //!   last-modified time of the object.
 //!
-//! Exit code 0 and a 2xx status are success. Exit code 75, a 5xx status, a 429
-//! status, a connection failure and a timeout are transient errors, retried up
-//! to `retries` times. Any other exit code or status is a permanent error,
-//! which dead-letters the task instance. A program or a request must be
-//! idempotent per attempt.
+//! The `subprocess` and `shell` operators kill a program when its run time
+//! exceeds the `timeout` parameter. A program or a request must be idempotent
+//! per attempt.
 //!
 //! # Schedule
 //!

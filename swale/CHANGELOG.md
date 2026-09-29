@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `swale status <graph> --from <partition>` lists the graph runs at or after a
   partition, and the read starts at that partition. `StatusReader::runs` takes
   the start partition as an `Option`, and `records::scan` takes a `KvRange`.
+- The `subprocess` and `shell` operators kill a program whose run time exceeds
+  `timeout`, and the attempt fails with a transient error. `SubprocessParams`
+  and `ShellParams` require `timeout`.
 
 ### Changed
 

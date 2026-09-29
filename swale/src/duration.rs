@@ -39,6 +39,14 @@ pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duratio
     parse(&text).map_err(serde::de::Error::custom)
 }
 
+/// Deserializes an optional duration from its text form, for a serde field with
+/// `#[serde(default)]`.
+pub fn deserialize_option<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error> {
+    deserialize(deserializer).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

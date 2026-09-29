@@ -3,17 +3,22 @@
 //!
 //! The stdin document is `{run_id, graph, partition, node, attempt, params,
 //! inputs}`, where `inputs` maps each upstream node name to its output. Exit
-//! code 0 is success and stdout is the output (an empty stdout is `null`).
-//! Exit code 75 (`EX_TEMPFAIL`) is a transient error, and any other code, a
-//! signal or a program that cannot start is a permanent error. Stderr is
-//! logged, and its tail is included in an error message. The program must be
-//! idempotent per attempt.
+//! code 0 is success and stdout is the output (an empty stdout is `null`). Exit
+//! code 75 (`EX_TEMPFAIL`) is a transient error, and any other code, a signal
+//! or a program that cannot start is a permanent error. Stderr is logged, and
+//! its tail is included in an error message. The program must be idempotent per
+//! attempt.
+//!
+//! The operator kills the program when its run time exceeds the `timeout`
+//! parameter, and the attempt fails with a transient error. Without `timeout`,
+//! the run time of the program is unbounded.
 //!
 //! The `shell` operator ([`super::shell`]) runs a command line with the same
 //! exit code protocol.
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,6 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use super::{Lease, Operator, Outcome, Task, keep_lease, tail};
+use crate::duration;
 
 /// Exit code for a transient failure.
 pub const EX_TEMPFAIL: i32 = 75;
@@ -33,6 +39,9 @@ pub struct SubprocessParams {
     /// The program followed by its arguments. It must not be empty.
     #[serde(deserialize_with = "non_empty_argv")]
     pub argv: Vec<String>,
+    /// The time the program can run.
+    #[serde(default, deserialize_with = "duration::deserialize_option")]
+    pub timeout: Option<Duration>,
 }
 
 fn non_empty_argv<'de, D: serde::Deserializer<'de>>(
@@ -79,18 +88,19 @@ impl Operator for Subprocess {
         .expect("the stdin document serializes to JSON");
         let mut command = Command::new(&params.argv[0]);
         command.args(&params.argv[1..]);
-        run_program(task, command, Some(document), self.lease).await
+        run_program(task, command, Some(document), params.timeout, self.lease).await
     }
 }
 
-/// Runs `command` to its end with the exit code protocol. `stdin` is written
-/// to the program and closed, or stdin is closed at the start. The lease is
-/// extended while the program runs, and a cancellation of the run kills the
-/// program.
+/// Runs `command` to its end with the exit code protocol. `stdin` is written to
+/// the program and closed, or stdin is closed at the start. The lease is
+/// extended while the program runs. `run_program` kills the program when the
+/// run is cancelled or when the run time of the program exceeds `timeout`.
 pub(crate) async fn run_program(
     task: &Task<'_>,
     mut command: Command,
     stdin: Option<Vec<u8>>,
+    timeout: Option<Duration>,
     lease: Lease,
 ) -> Result<Outcome, StepError> {
     let run_id = task.identity.run_id();
@@ -127,6 +137,12 @@ pub(crate) async fn run_program(
         let _ = pipe.write_all(&document).await;
     }
 
+    let deadline = async {
+        match timeout {
+            Some(timeout) => tokio::time::sleep(timeout).await,
+            None => std::future::pending().await,
+        }
+    };
     let status = tokio::select! {
         status = child.wait() => status
             .map_err(|e| StepError::permanent(format!("cannot wait for `{program}`: {e}")))?,
@@ -134,6 +150,13 @@ pub(crate) async fn run_program(
         () = task.step.cancel_token.cancelled() => {
             let _ = child.kill().await;
             return Err(StepError::transient("the run was cancelled while the program ran"));
+        }
+        () = deadline => {
+            let _ = child.kill().await;
+            return Err(StepError::transient(format!(
+                "`{program}` did not exit within {:?}",
+                timeout.unwrap_or_default()
+            )));
         }
     };
     let (out, err) = output
@@ -202,6 +225,7 @@ mod tests {
         };
         let argv = SubprocessParams {
             argv: vec!["sh".into(), "-c".into(), script.into()],
+            timeout: None,
         };
         Subprocess::default().run(&task, argv).await
     }
@@ -269,10 +293,39 @@ mod tests {
                 &task,
                 SubprocessParams {
                     argv: vec!["/nonexistent/program".into()],
+                    timeout: None,
                 },
             )
             .await
             .unwrap_err();
         assert_eq!(err.kind, StepErrorKind::Permanent);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_program_that_exceeds_its_timeout_fails_as_transient() {
+        // The runtime advances the paused clock to the timeout once the test
+        // waits only on the program.
+        let step = Step::detached(Vec::new());
+        let identity = identity();
+        let params = Value::Null;
+        let inputs = BTreeMap::new();
+        let task = Task {
+            step: &step,
+            identity: &identity,
+            params: &params,
+            inputs: &inputs,
+            state: None,
+            now_ms: 0,
+        };
+        let params: SubprocessParams =
+            serde_json::from_value(serde_json::json!({"argv": ["sleep", "30"], "timeout": "1s"}))
+                .unwrap();
+        let err = Subprocess::default().run(&task, params).await.unwrap_err();
+        assert_eq!(err.kind, StepErrorKind::Transient);
+        assert!(
+            err.message.contains("`sleep` did not exit within 1s"),
+            "{}",
+            err.message
+        );
     }
 }

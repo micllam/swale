@@ -12,6 +12,7 @@ pool = "default"
 retries = 3
 [node.params]
 command = "dbt run --select orders_raw --vars 'partition: {{ partition }}' >&2 && printf '{\"table\": \"orders_raw\"}'"
+timeout = "2h"
 
 [[node]]
 name = "transform"

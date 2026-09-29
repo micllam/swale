@@ -13,6 +13,7 @@ produces = "first"
 operator = "shell"
 [node.params]
 command = "printf '{\"n\": 1}'"
+timeout = "1m"
 
 [[node]]
 name = "second"
