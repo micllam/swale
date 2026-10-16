@@ -81,6 +81,34 @@ and the env reference is an environment variable of the daemon.
 The `subprocess` and `shell` operators kill a program when its run time exceeds
 the `timeout` parameter. A program or a request must be idempotent per attempt.
 
+## Mapped nodes
+
+A node with `each` is a mapped node, a node that runs its operator once per
+item. The template of `each` renders to a JSON array, and each item runs as a
+member of the node. A parameter string of a mapped node refers to the item with
+`{{ item }}` or `{{ item.<path> }}`.
+
+```toml
+[[node]]
+name = "export"
+produces = "orders_exports"
+consumes = ["orders_clean"]
+operator = "http"
+each = '["eu", "us", "apac"]'
+[node.params]
+method = "POST"
+url = "https://warehouse.example/export/{{ item }}"
+```
+
+The members run in the pool and with the `retries` of their node. No worker is
+held while the members run. The output of the node is the array of the member
+outputs in item order.
+
+The node fails when a member fails, once every member is terminated. A rerun of
+the failed node runs only the members that did not succeed. When the items or
+the upstream outputs that the parameters refer to differ, every member runs
+again. A member receives those upstream outputs alone.
+
 ## Schedule
 
 The daemon fires the `schedule` of a graph, a cron expression with five fields
@@ -158,19 +186,21 @@ record.
 
 ```console
 $ swale validate examples/orders_daily.toml
-orders_daily: 5 nodes, 3 edges
+orders_daily: 6 nodes, 4 edges
 $ swale run examples/local.toml --store ./swale-store
 local/none: started, 1 root node(s) submitted
   first: succeeded (local-none-first-r0)
   second: succeeded (local-none-second-r0)
+  third: succeeded (local-none-third-r0)
 local/none: complete
 $ swale status local none --store ./swale-store
 local/none: complete, requested 2026-09-17T13:48:19Z, definition 9450f82715de
-NODE    POOL     STATE      RUN                   TERMINATED
-first   default  succeeded  local-none-first-r0   2026-09-17T13:48:19Z
-second  default  succeeded  local-none-second-r0  2026-09-17T13:48:20Z
+NODE    POOL     STATE      INSTANCE  RUN                   TERMINATED
+first   default  succeeded  -         local-none-first-r0   2026-09-17T13:48:19Z
+second  default  succeeded  -         local-none-second-r0  2026-09-17T13:48:20Z
+third   default  succeeded  -         local-none-third-r0   2026-09-17T13:48:26Z
 $ swale publish examples/orders_daily.toml --store s3://bucket/swale
-orders_daily: published 36e831ff15e026ad45115374cb98edec6b617dffb0d4ef40f9fd351ea36bca9a
+orders_daily: published ac04ecabf07dc9a6d74c698a89e90f5d36c0da5ae659b6bcf7c81f4880590628
 $ swale daemon --store s3://bucket/swale --pool warehouse=2
 $ swale rerun orders_daily 20260915 transform --store s3://bucket/swale --wait
 request 01K5ARRE8ZW9K8XTJTQ6PVYJK7: submitted orders_daily-20260915-transform-r1

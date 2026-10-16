@@ -55,3 +55,16 @@ method = "POST"
 url = "https://chat.example/hook"
 headers = { "Content-Type" = "application/json" }
 body = "{{ run.summary }}"
+
+[[node]]
+name = "export"
+produces = "orders_exports"
+consumes = ["orders_clean"]
+operator = "http"
+each = '["eu", "us", "apac"]'
+[node.params]
+method = "POST"
+url = "https://warehouse.example/export/{{ item }}"
+headers = { "Content-Type" = "application/json" }
+body = '{"partition": "{{ partition }}", "rows_key": "{{ upstream.transform.rows_key }}"}'
+timeout = "10m"

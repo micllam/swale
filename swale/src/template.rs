@@ -10,6 +10,8 @@
 //!   value at a dotted path into it, such as `rows.0.id`.
 //! - `{{ env.<NAME> }}`, an environment variable of the process that renders
 //!   the template.
+//! - `{{ item }}`, the item of a member of a mapped node, or
+//!   `{{ item.<path> }}`, the value at a dotted path into it.
 //!
 //! A reference to an unset variable fails the task instance. The error of a
 //! failed `http` request includes the URL.
@@ -27,6 +29,9 @@ pub struct RenderContext<'a> {
     pub upstream: &'a BTreeMap<String, serde_json::Value>,
     /// The environment variables, by name.
     pub env: &'a BTreeMap<String, String>,
+    /// The item of a member of a mapped node, for `{{ item }}`. `None` for
+    /// every other run.
+    pub item: Option<&'a serde_json::Value>,
 }
 
 /// The fields of the run of a task instance.
@@ -62,6 +67,15 @@ pub enum RenderError {
         /// The variable name.
         name: String,
     },
+    /// The run is not a member of a mapped node, so there is no item.
+    #[error("the run does not have an item")]
+    MissingItem,
+    /// The path is absent from the item.
+    #[error("path `{path}` is absent from the item")]
+    MissingItemPath {
+        /// The dotted path.
+        path: String,
+    },
 }
 
 /// One piece of a parsed [`Template`].
@@ -78,6 +92,9 @@ enum Segment {
     Upstream { node: String, path: Vec<String> },
     /// The environment variable of the name.
     Env(String),
+    /// A value from the item of a member: the dotted path into the item, split
+    /// at the dots.
+    Item { path: Vec<String> },
 }
 
 /// A field of the run, the part after `run.` in a reference.
@@ -140,8 +157,15 @@ impl Template {
         })
     }
 
-    /// Renders the template. A string value from an upstream output is
-    /// copied as is, and any other JSON value as its JSON text.
+    /// Whether the template refers to `{{ item }}`.
+    pub fn refers_to_item(&self) -> bool {
+        self.segments
+            .iter()
+            .any(|segment| matches!(segment, Segment::Item { .. }))
+    }
+
+    /// Renders the template. A string value from an upstream output or from the
+    /// item is copied as is, and any other JSON value as its JSON text.
     pub fn render(&self, ctx: &RenderContext<'_>) -> Result<String, RenderError> {
         let mut out = String::new();
         for segment in &self.segments {
@@ -151,27 +175,15 @@ impl Template {
                 Segment::Run(RunField::Id) => out.push_str(ctx.run.id),
                 Segment::Run(RunField::Summary) => out.push_str(ctx.run.summary),
                 Segment::Upstream { node, path } => {
-                    let mut value = ctx
+                    let output = ctx
                         .upstream
                         .get(node)
                         .ok_or_else(|| RenderError::MissingUpstream { node: node.clone() })?;
-                    for key in path {
-                        value = match value {
-                            serde_json::Value::Object(map) => map.get(key),
-                            serde_json::Value::Array(items) => {
-                                key.parse::<usize>().ok().and_then(|i| items.get(i))
-                            }
-                            _ => None,
-                        }
-                        .ok_or_else(|| RenderError::MissingPath {
-                            node: node.clone(),
-                            path: path.join("."),
-                        })?;
-                    }
-                    match value {
-                        serde_json::Value::String(text) => out.push_str(text),
-                        other => out.push_str(&other.to_string()),
-                    }
+                    let value = lookup(output, path).ok_or_else(|| RenderError::MissingPath {
+                        node: node.clone(),
+                        path: path.join("."),
+                    })?;
+                    push_value(&mut out, value);
                 }
                 Segment::Env(name) => {
                     let value = ctx
@@ -180,17 +192,51 @@ impl Template {
                         .ok_or_else(|| RenderError::MissingEnv { name: name.clone() })?;
                     out.push_str(value);
                 }
+                Segment::Item { path } => {
+                    let item = ctx.item.ok_or(RenderError::MissingItem)?;
+                    let value = lookup(item, path).ok_or_else(|| RenderError::MissingItemPath {
+                        path: path.join("."),
+                    })?;
+                    push_value(&mut out, value);
+                }
             }
         }
         Ok(out)
     }
 }
 
+/// The value at `path` into `value`: a key of an object or an index of an array
+/// at each part.
+fn lookup<'a>(value: &'a serde_json::Value, path: &[String]) -> Option<&'a serde_json::Value> {
+    path.iter().try_fold(value, |value, key| match value {
+        serde_json::Value::Object(map) => map.get(key),
+        serde_json::Value::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),
+        _ => None,
+    })
+}
+
+/// Appends a string value as is, and any other JSON value as its JSON text.
+fn push_value(out: &mut String, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => out.push_str(text),
+        other => out.push_str(&other.to_string()),
+    }
+}
+
 fn reference(text: &str) -> Result<Segment, TemplateError> {
     match text {
         "partition" => Ok(Segment::Partition),
+        "item" => Ok(Segment::Item { path: Vec::new() }),
         _ => {
             let unknown = || TemplateError::UnknownReference(text.to_string());
+            if let Some(rest) = text.strip_prefix("item.") {
+                let path: Vec<String> = rest.split('.').map(str::to_string).collect();
+                return if path.iter().any(String::is_empty) {
+                    Err(unknown())
+                } else {
+                    Ok(Segment::Item { path })
+                };
+            }
             if let Some(field) = text.strip_prefix("run.") {
                 return match field {
                     "id" => Ok(Segment::Run(RunField::Id)),
@@ -234,7 +280,7 @@ mod tests {
     #[test]
     fn parses_literals_and_each_reference_in_source_order() {
         let template = Template::parse(
-            "a/{{ partition }}/{{run.id}}-{{ run.summary }}{{ upstream.extract.rows.key }}{{ env.TOKEN }}",
+            "a/{{ partition }}/{{run.id}}-{{ run.summary }}{{ upstream.extract.rows.key }}{{ env.TOKEN }}{{ item }}{{ item.url.0 }}",
         )
         .unwrap();
         assert_eq!(
@@ -251,8 +297,14 @@ mod tests {
                     path: vec!["rows".into(), "key".into()],
                 },
                 Segment::Env("TOKEN".into()),
+                Segment::Item { path: vec![] },
+                Segment::Item {
+                    path: vec!["url".into(), "0".into()],
+                },
             ]
         );
+        assert!(template.refers_to_item());
+        assert!(!Template::parse("{{ partition }}").unwrap().refers_to_item());
     }
 
     #[test]
@@ -282,6 +334,7 @@ mod tests {
             serde_json::json!({"rows": 3, "key": "a/b", "list": [{"x": true}]}),
         )]);
         let env = BTreeMap::from([("TOKEN".to_string(), "t0k".to_string())]);
+        let item = serde_json::json!({"url": "https://a.test/", "tags": ["x"]});
         let ctx = RenderContext {
             partition: "20260915",
             run: RunContext {
@@ -290,6 +343,7 @@ mod tests {
             },
             upstream: &upstream,
             env: &env,
+            item: Some(&item),
         };
         let render = |text: &str| Template::parse(text).unwrap().render(&ctx);
         assert_eq!(
@@ -323,6 +377,23 @@ mod tests {
                 name: "OTHER".into()
             })
         );
+        assert_eq!(render("{{ item.url }}").unwrap(), "https://a.test/");
+        assert_eq!(render("{{ item.tags.0 }}").unwrap(), "x");
+        assert_eq!(
+            render("{{ item }}").unwrap(),
+            r#"{"tags":["x"],"url":"https://a.test/"}"#
+        );
+        assert_eq!(
+            render("{{ item.tags.1 }}"),
+            Err(RenderError::MissingItemPath {
+                path: "tags.1".into()
+            })
+        );
+        let without_item = RenderContext { item: None, ..ctx };
+        assert_eq!(
+            Template::parse("{{ item }}").unwrap().render(&without_item),
+            Err(RenderError::MissingItem)
+        );
     }
 
     #[test]
@@ -346,6 +417,9 @@ mod tests {
             "{{ env.1A }}",
             "{{ env.A.B }}",
             "{{ env.A-B }}",
+            "{{ item. }}",
+            "{{ item.a..b }}",
+            "{{ items }}",
         ] {
             assert!(
                 matches!(

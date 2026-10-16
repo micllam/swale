@@ -65,14 +65,15 @@ the firings missed during downtime.
 ```console
 $ cargo install swale
 $ swale validate swale/examples/orders_daily.toml
-orders_daily: 5 nodes, 3 edges
+orders_daily: 6 nodes, 4 edges
 $ swale run swale/examples/local.toml --store ./swale-store
 local/none: started, 1 root node(s) submitted
   first: succeeded (local-none-first-r0)
   second: succeeded (local-none-second-r0)
+  third: succeeded (local-none-third-r0)
 local/none: complete
 $ swale publish swale/examples/orders_daily.toml --store s3://bucket/swale
-orders_daily: published 36e831ff15e026ad45115374cb98edec6b617dffb0d4ef40f9fd351ea36bca9a
+orders_daily: published ac04ecabf07dc9a6d74c698a89e90f5d36c0da5ae659b6bcf7c81f4880590628
 $ swale daemon --store s3://bucket/swale --pool warehouse=2
 ```
 

@@ -3,8 +3,11 @@
 //! so a definition edit that changes a node's parameters while its run is
 //! active fails the resubmission with an input mismatch. The payload of a
 //! later step of the run is the input with the state of the previous step.
+//!
+//! The input of a mapped node includes the template of its items, and the input
+//! of a member adds its item to the input of the node.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +31,25 @@ pub struct TaskInput {
     /// The state of the previous step of the run. `None` on the first step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<Value>,
+    /// The template of the items of a mapped node. `None` for a node that runs
+    /// once and for a member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub each: Option<String>,
+    /// The item of a member of a mapped node. `None` for every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<Value>,
+}
+
+/// The `each` template of a mapped node does not give the items.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ItemsError {
+    /// A reference of the template cannot be resolved.
+    #[error("`each`: {0}")]
+    Render(#[from] RenderError),
+    /// The rendered text is not a JSON array. The string is the parser's
+    /// message, or the type of the value.
+    #[error("`each` does not render to a JSON array: {0}")]
+    NotAnArray(String),
 }
 
 /// The terminal status of an upstream node.
@@ -66,6 +88,28 @@ impl TaskInput {
             inputs,
             upstreams,
             state: None,
+            each: node.each().map(str::to_string),
+            item: None,
+        }
+    }
+
+    /// The input of the member of a mapped node with `item`: the input of the
+    /// node with the item, and without the template of the items and the state.
+    /// Of the upstream outputs, it includes those that the parameters refer to.
+    pub fn member(&self, item: Value) -> Self {
+        let mut referred = BTreeSet::new();
+        referred_upstreams(&self.params, &mut referred);
+        TaskInput {
+            inputs: self
+                .inputs
+                .iter()
+                .filter(|(name, _)| referred.contains(*name))
+                .map(|(name, output)| (name.clone(), output.clone()))
+                .collect(),
+            state: None,
+            each: None,
+            item: Some(item),
+            ..self.clone()
         }
     }
 
@@ -81,8 +125,9 @@ impl TaskInput {
         .to_string()
     }
 
-    /// The parameters with every template reference rendered, with `env` as
-    /// the environment variables of `{{ env.<NAME> }}`.
+    /// The parameters with every template reference rendered, with `env` as the
+    /// environment variables of `{{ env.<NAME> }}`. In a member of a mapped
+    /// node, `{{ run.id }}` is the run id of the task instance of the node.
     pub fn rendered_params(
         &self,
         identity: &TaskIdentity,
@@ -98,8 +143,70 @@ impl TaskInput {
             },
             upstream: &self.inputs,
             env,
+            item: self.item.as_ref(),
         };
         render_value(&self.params, &ctx)
+    }
+
+    /// The items of a mapped node: the array that the template of `each`
+    /// renders to, with `env` as in [`Self::rendered_params`]. An input without
+    /// the template does not have an item.
+    pub fn rendered_items(
+        &self,
+        identity: &TaskIdentity,
+        env: &BTreeMap<String, String>,
+    ) -> Result<Vec<Value>, ItemsError> {
+        let Some(each) = &self.each else {
+            return Ok(Vec::new());
+        };
+        let run_id = identity.run_id();
+        let summary = self.run_summary(identity);
+        let ctx = RenderContext {
+            partition: identity.partition.as_str(),
+            run: RunContext {
+                id: run_id.as_str(),
+                summary: &summary,
+            },
+            upstream: &self.inputs,
+            env,
+            item: None,
+        };
+        let text = match Template::parse(each) {
+            Ok(template) => template.render(&ctx)?,
+            Err(_) => each.clone(),
+        };
+        match serde_json::from_str(&text) {
+            Ok(Value::Array(items)) => Ok(items),
+            Ok(other) => Err(ItemsError::NotAnArray(
+                match other {
+                    Value::Null => "the value is null",
+                    Value::Bool(_) => "the value is a boolean",
+                    Value::Number(_) => "the value is a number",
+                    Value::String(_) => "the value is a string",
+                    Value::Array(_) | Value::Object(_) => "the value is an object",
+                }
+                .to_string(),
+            )),
+            Err(e) => Err(ItemsError::NotAnArray(e.to_string())),
+        }
+    }
+}
+
+/// Adds the upstream nodes that the templates of `value` refer to.
+fn referred_upstreams(value: &Value, nodes: &mut BTreeSet<String>) {
+    match value {
+        Value::String(text) => {
+            if let Ok(template) = Template::parse(text) {
+                nodes.extend(template.upstream_nodes().map(str::to_string));
+            }
+        }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| referred_upstreams(item, nodes)),
+        Value::Object(map) => map
+            .values()
+            .for_each(|item| referred_upstreams(item, nodes)),
+        _ => {}
     }
 }
 
@@ -149,6 +256,7 @@ mod tests {
                     pool: "default".into(),
                     retries: 0,
                     params: "command = \"true\"".parse().unwrap(),
+                    each: None,
                 },
                 NodeSpec {
                     name: "load".into(),
@@ -168,6 +276,7 @@ mod tests {
                     "#
                     .parse()
                     .unwrap(),
+                    each: None,
                 },
             ],
         };
@@ -256,6 +365,65 @@ mod tests {
             Err(RenderError::MissingUpstream {
                 node: "extract".into()
             })
+        );
+    }
+
+    #[test]
+    fn items_render_from_each_and_a_member_renders_its_item() {
+        let identity = identity();
+        let env = BTreeMap::new();
+        let mut input = TaskInput {
+            operator: "shell".into(),
+            params: serde_json::json!({
+                "command": "fetch {{ item.url }} {{ run.id }}",
+                "env": {"TOKEN": "{{ upstream.login.token }}"},
+            }),
+            inputs: BTreeMap::from([
+                (
+                    "extract".to_string(),
+                    serde_json::json!({"pages": [{"url": "a"}, {"url": "b"}], "rows": 3}),
+                ),
+                ("login".to_string(), serde_json::json!({"token": "t0k"})),
+            ]),
+            upstreams: BTreeMap::new(),
+            state: Some(serde_json::json!({"phase": "poll"})),
+            each: Some("{{ upstream.extract.pages }}".into()),
+            item: None,
+        };
+        let items = input.rendered_items(&identity, &env).unwrap();
+        assert_eq!(
+            items,
+            [
+                serde_json::json!({"url": "a"}),
+                serde_json::json!({"url": "b"})
+            ]
+        );
+
+        let member = input.member(items[1].clone());
+        assert_eq!((&member.each, &member.state), (&None, &None));
+        // The parameters refer to `login` alone.
+        assert_eq!(member.inputs.keys().collect::<Vec<_>>(), ["login"]);
+        assert_eq!(TaskInput::from_bytes(&member.to_bytes()).unwrap(), member);
+        assert_eq!(
+            member.rendered_params(&identity, &env).unwrap(),
+            serde_json::json!({
+                "command": "fetch b g-20260915-load-r0",
+                "env": {"TOKEN": "t0k"},
+            })
+        );
+
+        input.each = Some("{{ upstream.extract.rows }}".into());
+        assert_eq!(
+            input.rendered_items(&identity, &env),
+            Err(ItemsError::NotAnArray("the value is a number".into()))
+        );
+        input.each = Some("{{ upstream.other }}".into());
+        assert_eq!(
+            input
+                .rendered_items(&identity, &env)
+                .unwrap_err()
+                .to_string(),
+            "`each`: no output is recorded for upstream `other`"
         );
     }
 }

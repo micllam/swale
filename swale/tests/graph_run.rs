@@ -1,11 +1,13 @@
 //! Graph runs end to end on an in-memory store: the subprocess operator, the
-//! hook, the events worker and the reconciler.
+//! hook, the events worker and the reconciler. The status of the members of a
+//! mapped node is read without a wait between two reads.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::TryStreamExt;
 use swale::JsonBytes;
 use swale::records::{GraphRunRecord, GraphRunState, NodeRecord, RecordStatus, graph_run_key};
 use swale::scheduler::ReconcileReport;
@@ -13,8 +15,8 @@ use swale::{
     DefinitionStore, OperatorSet, Partition, Pools, RecordHook, RerunOutcome, Scheduler,
     SchedulerOptions,
 };
-use taquba::{MockClock, Queue};
-use taquba_workflow::{RunId, RunState};
+use taquba::{KvOrder, MockClock, Queue};
+use taquba_workflow::{GroupStatus, RunId, RunState};
 use tokio_util::sync::CancellationToken;
 
 mod common;
@@ -89,6 +91,7 @@ impl Harness {
         let pools = Arc::new(
             Pools::builder(queue.clone(), store, operators, hook)
                 .poll_interval(Duration::from_millis(10))
+                .member_poll_interval(Duration::ZERO)
                 .pool("default", 4)
                 .pool("warehouse", 1)
                 .build(),
@@ -615,4 +618,283 @@ command = "printf '{{\"size\": {{{{ upstream.arrival.size }}}}}}'"
     assert_eq!(arrival.output.as_ref().unwrap()["size"], 5);
     let load = h.record("swale/assets/loaded/20260915").await.unwrap();
     assert_eq!(load.output, Some(serde_json::json!({"size": 5})));
+}
+
+/// A graph with the mapped node `fetch` over the output of `list`, whose shell
+/// commands are `list` and `fetch`.
+fn mapped_definition_text(list: &str, fetch: &str) -> String {
+    format!(
+        r#"
+[graph]
+name = "orders"
+partition = "daily"
+
+[[node]]
+name = "list"
+produces = "urls"
+operator = "shell"
+[node.params]
+command = '{list}'
+
+[[node]]
+name = "fetch"
+produces = "pages"
+consumes = ["urls"]
+operator = "shell"
+each = "{{{{ upstream.list }}}}"
+[node.params]
+command = '{fetch}'
+"#
+    )
+}
+
+/// An empty directory `name` for the files of a test.
+fn scratch_dir(name: &str) -> std::path::PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The lines of `log` in lexical order.
+fn sorted_lines(log: &Path) -> Vec<String> {
+    let mut lines: Vec<String> = std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    lines.sort();
+    lines
+}
+
+impl Harness {
+    /// The status of the run group of the members of `fetch`, or `None` without
+    /// a group.
+    async fn fetch_group(&self) -> Option<GroupStatus> {
+        let group = self
+            .pools
+            .runtime("default")
+            .unwrap()
+            .group("orders-20260915-fetch".parse().unwrap());
+        match group.status().await {
+            Ok(status) => Some(status),
+            Err(taquba_workflow::Error::GroupNotFound(_)) => None,
+            Err(e) => panic!("{e}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mapped_node_runs_a_member_per_item_and_outputs_them_in_item_order() {
+    let text = format!(
+        r#"{}
+[[node]]
+name = "report"
+produces = "report"
+consumes = ["pages"]
+operator = "shell"
+[node.params]
+command = 'printf "%s" "{{{{ upstream.fetch.2.double }}}}"'
+"#,
+        mapped_definition_text(
+            r#"printf "[{\"n\": 1}, {\"n\": 2}, {\"n\": 3}]""#,
+            r#"printf "{\"double\": %s, \"run\": \"{{ run.id }}\"}" $(( {{ item.n }} * 2 ))"#,
+        )
+    );
+    let h = Harness::start(&text, true).await;
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+    h.wait_for_state(GraphRunState::Complete).await;
+
+    let fetch = h.record("swale/assets/pages/20260915").await.unwrap();
+    assert_eq!(fetch.run_id, "orders-20260915-fetch-r0");
+    let member =
+        |double: u32| serde_json::json!({"double": double, "run": "orders-20260915-fetch-r0"});
+    assert_eq!(
+        fetch.output,
+        Some(serde_json::json!([member(2), member(4), member(6)]))
+    );
+    let report = h.record("swale/assets/report/20260915").await.unwrap();
+    assert_eq!(report.output, Some(serde_json::json!(6)));
+
+    // A member does not write a record, and the group is removed with the
+    // success of the node.
+    let records = h
+        .queue
+        .view()
+        .kv_scan(b"swale/assets/", .., KvOrder::Ascending, 100)
+        .await
+        .unwrap();
+    assert_eq!(records.entries.len(), 3);
+    assert_eq!(h.fetch_group().await, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_member_fails_the_node_and_a_rerun_runs_the_failed_members_alone() {
+    let dir = scratch_dir("mapped_rerun");
+    let log = dir.join("log");
+    std::fs::write(dir.join("ok-a"), b"").unwrap();
+    std::fs::write(dir.join("ok-c"), b"").unwrap();
+    let text = mapped_definition_text(
+        r#"printf "[\"a\", \"b\", \"c\"]""#,
+        &format!(
+            r#"echo {{{{ item }}}} >> {dir}/log; test -e {dir}/ok-{{{{ item }}}} && printf "\"{{{{ item }}}}\"""#,
+            dir = dir.display()
+        ),
+    );
+    let h = Harness::start(&text, true).await;
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+    h.wait_for_state(GraphRunState::Failed).await;
+
+    let fetch = h.record("swale/assets/pages/20260915").await.unwrap();
+    assert_eq!(fetch.status, RecordStatus::Failed);
+    let error = fetch.error.unwrap();
+    assert!(
+        error.starts_with("1 of 3 members did not succeed, and member 1 is the first: "),
+        "{error}"
+    );
+    assert_eq!(sorted_lines(&log), ["a", "b", "c"]);
+    let group = h.fetch_group().await.unwrap();
+    assert_eq!(
+        (group.total, group.succeeded, group.failed, group.pending),
+        (3, 2, 1, 0)
+    );
+
+    std::fs::write(dir.join("ok-b"), b"").unwrap();
+    assert_eq!(
+        h.scheduler
+            .rerun("orders", &Harness::partition(), "fetch")
+            .await
+            .unwrap(),
+        submitted("orders-20260915-fetch-r1")
+    );
+    h.wait_for_state(GraphRunState::Complete).await;
+    let fetch = h.record("swale/assets/pages/20260915").await.unwrap();
+    assert_eq!(fetch.rerun, 1);
+    assert_eq!(fetch.output, Some(serde_json::json!(["a", "b", "c"])));
+    assert_eq!(sorted_lines(&log), ["a", "b", "b", "c"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_after_the_memo_retention_runs_every_member_again() {
+    let dir = scratch_dir("mapped_retention");
+    let log = dir.join("log");
+    std::fs::write(dir.join("ok-a"), b"").unwrap();
+    let text = mapped_definition_text(
+        r#"printf "[\"a\", \"b\"]""#,
+        &format!(
+            r#"echo {{{{ item }}}} >> {dir}/log; test -e {dir}/ok-{{{{ item }}}} && printf "\"{{{{ item }}}}\"""#,
+            dir = dir.display()
+        ),
+    );
+    let h = Harness::start(&text, true).await;
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+    h.wait_for_state(GraphRunState::Failed).await;
+    assert_eq!(sorted_lines(&log), ["a", "b"]);
+
+    // The sweep of the pool removes the run result record of each member once
+    // the memo retention of seven days ends. The member records remain.
+    h.clock.advance(Duration::from_secs(8 * 86_400));
+    let group = h
+        .pools
+        .runtime("default")
+        .unwrap()
+        .group("orders-20260915-fetch".parse().unwrap());
+    common::wait_until("the run result records were never removed", async || {
+        let results: Vec<taquba_workflow::MemberResult> =
+            group.results().await.unwrap().try_collect().await.unwrap();
+        results
+            .iter()
+            .all(|member| member.outcome.is_none())
+            .then_some(())
+    })
+    .await;
+    let status = h.fetch_group().await.unwrap();
+    assert_eq!((status.succeeded, status.failed), (1, 1));
+
+    std::fs::write(dir.join("ok-b"), b"").unwrap();
+    h.scheduler
+        .rerun("orders", &Harness::partition(), "fetch")
+        .await
+        .unwrap();
+    h.wait_for_state(GraphRunState::Complete).await;
+    let fetch = h.record("swale/assets/pages/20260915").await.unwrap();
+    assert_eq!(fetch.output, Some(serde_json::json!(["a", "b"])));
+    // The rerun runs `b`, and then every member of the new group.
+    assert_eq!(sorted_lines(&log), ["a", "a", "b", "b", "b"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_with_other_items_replaces_the_group_and_runs_every_member() {
+    let dir = scratch_dir("mapped_replace");
+    let log = dir.join("log");
+    std::fs::write(dir.join("items"), br#"["a", "b"]"#).unwrap();
+    std::fs::write(dir.join("ok-a"), b"").unwrap();
+    std::fs::write(dir.join("ok-c"), b"").unwrap();
+    let text = mapped_definition_text(
+        &format!("cat {dir}/items", dir = dir.display()),
+        &format!(
+            r#"echo {{{{ item }}}} >> {dir}/log; test -e {dir}/ok-{{{{ item }}}} && printf "\"{{{{ item }}}}\"""#,
+            dir = dir.display()
+        ),
+    );
+    let h = Harness::start(&text, true).await;
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+    h.wait_for_state(GraphRunState::Failed).await;
+    assert_eq!(sorted_lines(&log), ["a", "b"]);
+
+    // The rerun of `list` reaches `fetch`, whose failed record is below the
+    // expected count.
+    std::fs::write(dir.join("items"), br#"["a", "c"]"#).unwrap();
+    assert_eq!(
+        h.scheduler
+            .rerun("orders", &Harness::partition(), "list")
+            .await
+            .unwrap(),
+        submitted("orders-20260915-list-r1")
+    );
+    h.wait_for_state(GraphRunState::Complete).await;
+    let fetch = h.record("swale/assets/pages/20260915").await.unwrap();
+    assert_eq!(fetch.output, Some(serde_json::json!(["a", "c"])));
+    assert_eq!(sorted_lines(&log), ["a", "a", "b", "c"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_of_the_graph_run_cancels_the_members_and_the_retention_pass_removes_the_group() {
+    let text = mapped_definition_text(r#"printf "[1, 2]""#, "sleep 30 # {{ item }}");
+    let h = Harness::start(&text, true).await;
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+    common::wait_until("the members were never submitted", async || {
+        h.fetch_group().await.filter(|group| group.pending == 2)
+    })
+    .await;
+    assert!(
+        h.scheduler
+            .cancel_run("orders", &Harness::partition())
+            .await
+            .unwrap()
+    );
+    common::wait_until("the members were never cancelled", async || {
+        h.fetch_group().await.filter(|group| group.cancelled == 2)
+    })
+    .await;
+
+    let report = h.scheduler.expire(Duration::ZERO).await.unwrap();
+    assert_eq!(report.runs, 1);
+    assert_eq!(h.fetch_group().await, None);
+    assert!(h.graph_run().await.is_none());
 }

@@ -5,7 +5,8 @@
 //! the pool `name` is `swale-pool-{name}`, and its memos are at `memos/{name}`
 //! within the store prefix. The terminal hook of each runtime is the
 //! [`RecordHook`], which writes the node's record and enqueues the event for
-//! the scheduler.
+//! the scheduler. The members of a mapped node run on the runtime of the node's
+//! pool.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,7 +33,7 @@ pub(crate) fn memo_prefix(store_prefix: &str, pool: &str) -> String {
 
 /// One [`WorkflowRuntime`] per pool, all over one queue and one store.
 pub struct Pools {
-    runtimes: HashMap<String, PoolRuntime>,
+    runtimes: Arc<HashMap<String, PoolRuntime>>,
 }
 
 /// Builds a [`Pools`].
@@ -65,9 +66,27 @@ impl PoolsBuilder {
     /// The time the memos and the run result record of a terminated task
     /// instance are kept, seven days by default. The scheduler does not read
     /// them, so the retention determines how long an operator can inspect
-    /// them.
+    /// them. The rerun of a mapped node reads the run result record of every
+    /// member, and runs every member again when the record of a member is
+    /// removed.
     pub fn memo_retention(mut self, retention: Duration) -> Self {
         self.memo_retention = retention;
+        self
+    }
+
+    /// The time before the first read of the status of the members of a mapped
+    /// node, a second by default. The time doubles at each read, up to
+    /// [`Self::member_poll_max_interval`].
+    pub fn member_poll_interval(mut self, interval: Duration) -> Self {
+        self.dispatch = self.dispatch.member_poll_interval(interval);
+        self
+    }
+
+    /// The longest time between two reads of the status of the members of a
+    /// mapped node, thirty seconds by default. A longer
+    /// [`Self::member_poll_interval`] is the time between every two reads.
+    pub fn member_poll_max_interval(mut self, interval: Duration) -> Self {
+        self.dispatch = self.dispatch.member_poll_max_interval(interval);
         self
     }
 
@@ -80,26 +99,27 @@ impl PoolsBuilder {
 
     /// Builds the runtimes.
     pub fn build(self) -> Pools {
-        let runtimes = self
-            .pools
-            .into_iter()
-            .map(|(name, concurrency)| {
-                let runtime = WorkflowRuntime::builder(
-                    self.queue.clone(),
-                    self.store.clone(),
-                    self.dispatch.clone(),
-                    self.hook.clone(),
-                )
-                .queue_name(format!("swale-pool-{name}"))
-                .memo_prefix(memo_prefix(&self.store_prefix, &name))
-                .max_concurrent_steps(concurrency)
-                .poll_interval(self.poll_interval)
-                .memo_retention(self.memo_retention)
-                .build()
-                .expect("the record hook accepts the queue of every runtime");
-                (name, runtime)
-            })
-            .collect();
+        let runtimes = Arc::new_cyclic(|runtimes| {
+            self.pools
+                .into_iter()
+                .map(|(name, concurrency)| {
+                    let runtime = WorkflowRuntime::builder(
+                        self.queue.clone(),
+                        self.store.clone(),
+                        self.dispatch.clone().in_pool(runtimes.clone(), &name),
+                        self.hook.clone(),
+                    )
+                    .queue_name(format!("swale-pool-{name}"))
+                    .memo_prefix(memo_prefix(&self.store_prefix, &name))
+                    .max_concurrent_steps(concurrency)
+                    .poll_interval(self.poll_interval)
+                    .memo_retention(self.memo_retention)
+                    .build()
+                    .expect("the record hook accepts the queue of every runtime");
+                    (name, runtime)
+                })
+                .collect()
+        });
         Pools { runtimes }
     }
 }

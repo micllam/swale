@@ -16,12 +16,18 @@
 //! operator = "subprocess"
 //! pool = "default"
 //! retries = 0
+//! each = "{{ upstream.list.urls }}"  # optional, makes the node a mapped node
 //! [node.params]                # the operator's parameters
 //! argv = ["python", "tasks/extract.py"]
 //! ```
 //!
-//! The operators are `subprocess`, `shell` and `http` ([`crate::operator`]),
-//! and each documents its parameters.
+//! The operators are `subprocess`, `shell`, `http` and `object_exists`
+//! ([`crate::operator`]), and each documents its parameters.
+//!
+//! A node with `each` is a mapped node. The template of `each` renders to a
+//! JSON array, and the node runs its operator once per item of the array, as
+//! the members of the node ([`crate::dispatch`]). A parameter string of a
+//! mapped node refers to the item with `{{ item }}` or `{{ item.<path> }}`.
 //!
 //! A graph with a `schedule` declares `partition` as `daily` or `hourly`,
 //! because every firing runs a partition of its own (see [`crate::daemon`]).
@@ -102,6 +108,7 @@ pub fn load_str(text: &str, operators: &OperatorSet) -> Result<Graph, Error> {
                 pool: node.pool,
                 retries: node.retries,
                 params: node.params,
+                each: node.each,
             }
         })
         .collect();
@@ -196,6 +203,7 @@ struct NodeSection {
     retries: u32,
     #[serde(default)]
     params: toml::Table,
+    each: Option<String>,
 }
 
 fn default_pool() -> String {
@@ -277,6 +285,22 @@ mod tests {
         );
         assert_eq!(node.pool(), "p");
         assert_eq!(node.retries(), 2);
+    }
+
+    #[test]
+    fn each_is_parsed_and_makes_the_item_reference_valid() {
+        let text = format!(
+            "{MINIMAL}\n[[node]]\nname = \"m\"\nafter = [\"a\"]\noperator = \"subprocess\"\neach = \"{{{{ upstream.a }}}}\"\n[node.params]\nargv = [\"x\", \"{{{{ item }}}}\"]"
+        );
+        let graph = load(&text).unwrap();
+        assert_eq!(graph.node("m").unwrap().each(), Some("{{ upstream.a }}"));
+        assert_eq!(
+            problems(&text.replace("each = \"{{ upstream.a }}\"\n", "")),
+            vec![Problem::ItemWithoutEach {
+                node: "m".into(),
+                param: "argv.1".into(),
+            }]
+        );
     }
 
     #[test]

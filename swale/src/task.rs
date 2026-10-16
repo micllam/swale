@@ -1,6 +1,11 @@
 //! The identity of a task instance: the graph, the partition, the node and
 //! the rerun count, which together form the run id and the `swale.` headers
 //! of the run.
+//!
+//! The task instance of a mapped node submits one run per item, the members of
+//! the node, as a run group of the runtime with the id of [`group_id`]. A
+//! member has the headers of the task instance that submitted it and the
+//! [`HEADER_GROUP`] header.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -22,6 +27,8 @@ pub const HEADER_ASSET: &str = "swale.asset";
 pub const HEADER_DEFINITION: &str = "swale.definition";
 /// Header with the rerun count.
 pub const HEADER_RERUN: &str = "swale.rerun";
+/// Header with the group id, present on a member of a mapped node only.
+pub const HEADER_GROUP: &str = "swale.group";
 
 /// The identity of one task instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +69,14 @@ pub fn run_id(graph: &str, partition: &Partition, node: &str, rerun: u32) -> Run
         .expect("graph and node names are bounded so that every run id is valid")
 }
 
+/// The id `{graph}-{partition}-{node}` of the run group of the members of a
+/// mapped node. The id does not include the rerun count, so a rerun of the node
+/// submits the same group.
+pub fn group_id(graph: &str, partition: &Partition, node: &str) -> RunId {
+    RunId::new(format!("{graph}-{partition}-{node}"))
+        .expect("graph and node names are bounded so that every run id is valid")
+}
+
 /// The run id of the task instance of `node` that does not have a current
 /// record in the graph run `run`, whose node records are `records` by node
 /// name. It is the run at count 0 of a node without a record, and the run at
@@ -90,6 +105,12 @@ impl TaskIdentity {
     /// The run id of the task instance (see [`run_id`]).
     pub fn run_id(&self) -> RunId {
         run_id(&self.graph, &self.partition, &self.node, self.rerun)
+    }
+
+    /// The id of the run group of the members of the node (see
+    /// [`group_id`]).
+    pub fn group_id(&self) -> RunId {
+        group_id(&self.graph, &self.partition, &self.node)
     }
 
     /// The `swale.` headers of the run.
@@ -158,6 +179,14 @@ mod tests {
         assert_eq!(
             identity(Some("orders_raw")).run_id().as_str(),
             "orders_daily-20260915-extract-r2"
+        );
+    }
+
+    #[test]
+    fn group_id_does_not_include_the_rerun_count() {
+        assert_eq!(
+            identity(None).group_id().as_str(),
+            "orders_daily-20260915-extract"
         );
     }
 

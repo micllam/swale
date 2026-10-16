@@ -266,6 +266,7 @@ argv = ["true"]
             pool: "default".into(),
             retries: 0,
             params: r#"argv = ["true"]"#.parse().unwrap(),
+            each: None,
         }
     }
 

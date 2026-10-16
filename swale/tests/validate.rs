@@ -38,13 +38,24 @@ fn example_graph_loads_with_the_documented_structure() {
     let order: Vec<&str> = graph.nodes().iter().map(|n| n.name()).collect();
     assert_eq!(
         order,
-        ["extract", "transform", "load", "partition_ready", "notify"]
+        [
+            "extract",
+            "transform",
+            "load",
+            "partition_ready",
+            "notify",
+            "export"
+        ]
     );
     let roots: Vec<&str> = graph.roots().map(|n| n.name()).collect();
     assert_eq!(roots, ["extract", "partition_ready"]);
     let leaves: Vec<&str> = graph.leaves().map(|n| n.name()).collect();
-    assert_eq!(leaves, ["partition_ready", "notify"]);
-    assert_eq!(graph.edge_count(), 3);
+    assert_eq!(leaves, ["partition_ready", "notify", "export"]);
+    assert_eq!(graph.edge_count(), 4);
+    assert_eq!(
+        graph.node("export").unwrap().each(),
+        Some(r#"["eu", "us", "apac"]"#)
+    );
     assert_eq!(graph.node("load").unwrap().pool(), "warehouse");
     assert_eq!(graph.node("load").unwrap().retries(), 5);
 }
@@ -55,7 +66,7 @@ fn validate_command_reports_a_valid_definition_with_status_0() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "orders_daily: 5 nodes, 3 edges\n"
+        "orders_daily: 6 nodes, 4 edges\n"
     );
 }
 
@@ -145,6 +156,10 @@ fn run_command_completes_a_graph_on_a_directory_store_and_resumes_an_existing_ru
     );
     assert!(
         stdout.contains("  second: succeeded (local-none-second-r0)\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  third: succeeded (local-none-third-r0)\n"),
         "{stdout}"
     );
     assert!(stdout.ends_with("local/none: complete\n"), "{stdout}");
@@ -333,6 +348,10 @@ fn status_and_queues_commands_print_a_failed_run_and_never_create_a_store() {
     );
     assert!(
         stdout.contains("\nsecond  default  blocked  -         -"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\nthird   default  blocked  -         -"),
         "{stdout}"
     );
     assert!(

@@ -1,6 +1,7 @@
 //! The terminal hook of every pool: it writes the node's record and enqueues
 //! the event for the scheduler, and both commit with the termination of the
-//! task instance.
+//! task instance. A member of a mapped node does not write a record or an
+//! event.
 
 use std::sync::Arc;
 
@@ -10,7 +11,7 @@ use taquba_workflow::{RunOutcome, StepError, TerminalEffects, TerminalHook, Term
 
 use crate::partition::Partition;
 use crate::records::{JsonBytes, NodeRecord, RecordStatus};
-use crate::task::TaskIdentity;
+use crate::task::{HEADER_GROUP, TaskIdentity};
 
 /// The queue of the scheduler's events.
 pub const EVENTS_QUEUE: &str = "swale-events";
@@ -48,11 +49,7 @@ impl RecordHook {
     /// otherwise.
     pub fn record(&self, identity: &TaskIdentity, outcome: &RunOutcome) -> NodeRecord {
         let output = match (outcome.status, &outcome.result) {
-            (TerminalStatus::Succeeded, Some(bytes)) => {
-                Some(serde_json::from_slice(bytes).unwrap_or_else(|_| {
-                    serde_json::Value::String(String::from_utf8_lossy(bytes).into_owned())
-                }))
-            }
+            (TerminalStatus::Succeeded, Some(bytes)) => Some(output_value(bytes)),
             _ => None,
         };
         let mut record = NodeRecord {
@@ -73,6 +70,13 @@ impl RecordHook {
     }
 }
 
+/// The output of a succeeded run from its result: the JSON value of the bytes,
+/// or the bytes as a string when they are not JSON.
+pub(crate) fn output_value(bytes: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(bytes)
+        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(bytes).into_owned()))
+}
+
 impl TerminalHook for RecordHook {
     fn observes(&self, _outcome: &RunOutcome) -> bool {
         false
@@ -87,6 +91,9 @@ impl TerminalHook for RecordHook {
     }
 
     fn stage_effects(&self, outcome: &RunOutcome, effects: &TerminalEffects) {
+        if outcome.headers.contains_key(HEADER_GROUP) {
+            return;
+        }
         let identity = match TaskIdentity::from_headers(&outcome.headers) {
             Ok(identity) => identity,
             Err(e) => {

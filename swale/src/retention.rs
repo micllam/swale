@@ -7,11 +7,13 @@
 //! the record it refers to. [`Scheduler::expire`] runs one pass of the index.
 //! For a due entry of a graph run the pass removes the node records, the graph
 //! run record and the entry in one transaction, and for a due entry of a
-//! request record it removes the record and the entry. The pass discards an
-//! entry whose record is absent or whose time differs from the entry's, which
-//! is the entry of a settle that a rerun reactivated. A graph run whose
-//! definition does not load is kept, and the next pass reads its entry again. A
-//! start of a partition whose records were removed runs the graph again.
+//! request record it removes the record and the entry. Before the transaction
+//! of a graph run, the pass removes the run group of every mapped node of the
+//! run. The pass discards an entry whose record is absent or whose time differs
+//! from the entry's, which is the entry of a settle that a rerun reactivated. A
+//! graph run whose definition does not load is kept, and the next pass reads
+//! its entry again. A start of a partition whose records were removed runs the
+//! graph again.
 //!
 //! The daemon runs the pass after each sync pass.
 
@@ -39,10 +41,10 @@ impl Scheduler {
     /// One retention pass: removes the records of every graph run settled
     /// `retention` or more before the clock, and every request record of the
     /// same age. A graph run whose definition does not load is logged and kept,
-    /// and its entry is read again at the next pass. A failure of the store or
-    /// a record that does not parse ends the removals of the pass, and the pass
-    /// returns the failure once the index is read: the entries after the
-    /// failure are kept for the next pass.
+    /// and its entry is read again at the next pass. A failure of the store, a
+    /// group with an active member or a record that does not parse ends the
+    /// removals of the pass, and the pass returns the failure once the index is
+    /// read: the entries after the failure are kept for the next pass.
     pub async fn expire(&self, retention: Duration) -> Result<ExpireReport, Error> {
         let runs = AtomicUsize::new(0);
         let requests = AtomicUsize::new(0);
@@ -90,8 +92,9 @@ impl Scheduler {
 
     /// The removal of the records of the graph run settled at `time_ms`: the
     /// node records and the graph run record, against the record's stored
-    /// bytes. A run whose record is absent or was settled at another time is
-    /// stale, and a run whose definition does not load is kept.
+    /// bytes. The run group of every mapped node is removed before the records.
+    /// A run whose record is absent or was settled at another time is stale,
+    /// and a run whose definition does not load is kept.
     async fn expire_run(
         &self,
         time_ms: u64,
@@ -117,6 +120,7 @@ impl Scheduler {
                 return Ok(Expired::Keep);
             }
         };
+        self.forget_groups(&definition, partition).await?;
         let mut effects = SettlementEffects::default().kv_delete(run_key.clone());
         for node in definition.nodes() {
             effects = effects.kv_delete(records::node_record_key(graph, partition, node));

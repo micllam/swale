@@ -3,6 +3,7 @@
 #     swale run examples/local.toml --store ./swale-store
 #
 # `first` prints an output, and `second` receives it through a template.
+# `third` is a mapped node: it runs its command once per item of `each`.
 
 [graph]
 name = "local"
@@ -22,3 +23,12 @@ consumes = ["first"]
 operator = "shell"
 [node.params]
 command = "printf '{\"n\": {{ upstream.first.n }}}'"
+
+[[node]]
+name = "third"
+produces = "third"
+consumes = ["first"]
+operator = "shell"
+each = "[1, 2, 3]"
+[node.params]
+command = "printf '%s' $(( {{ item }} + {{ upstream.first.n }} ))"

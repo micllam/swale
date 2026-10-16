@@ -89,6 +89,9 @@ pub struct NodeSpec {
     /// The operator parameters. A string value can contain template
     /// references.
     pub params: toml::Table,
+    /// The template of the items of a mapped node, which renders to a JSON
+    /// array. `None` for a node that runs once.
+    pub each: Option<String>,
 }
 
 /// The input to [`Graph::build`].
@@ -160,6 +163,12 @@ impl Node {
     /// The operator parameters.
     pub fn params(&self) -> &toml::Table {
         &self.spec.params
+    }
+
+    /// The template of the items of a mapped node, or `None` for a node that
+    /// runs once.
+    pub fn each(&self) -> Option<&str> {
+        self.spec.each.as_deref()
     }
 
     /// The names of the upstream nodes, in lexical order.
@@ -319,6 +328,36 @@ pub enum Problem {
         /// The referenced node.
         upstream: String,
     },
+    /// A parameter refers to `item` in a node without `each`.
+    #[error(
+        "node `{node}`: parameter `{param}` refers to `item`, and the node does not declare `each`"
+    )]
+    ItemWithoutEach {
+        /// The node.
+        node: String,
+        /// The path of the parameter in `params`, such as
+        /// `headers.Authorization`.
+        param: String,
+    },
+    /// The `each` field is not a template.
+    #[error("node `{node}`: `each` is not a template: {message}")]
+    InvalidEach {
+        /// The node.
+        node: String,
+        /// The parser's message.
+        message: String,
+    },
+    /// The `each` field refers to `item`.
+    #[error("node `{0}`: `each` refers to `item`")]
+    EachRefersToItem(String),
+    /// The `each` field refers to a node that is not an upstream of the node.
+    #[error("node `{node}`: `each` refers to `{upstream}`, which is not an upstream of the node")]
+    UnknownEachUpstream {
+        /// The node.
+        node: String,
+        /// The referenced node.
+        upstream: String,
+    },
     /// The edges form a cycle. The path lists the nodes along the cycle, each
     /// an upstream of the one before it, with the first node repeated at the
     /// end.
@@ -448,7 +487,10 @@ impl Graph {
                 }
             }
             for (key, item) in &node.params {
-                check_templates(&node.name, key, item, upstream, &mut problems);
+                check_templates(node, key, item, upstream, &mut problems);
+            }
+            if let Some(each) = &node.each {
+                check_each(&node.name, each, upstream, &mut problems);
             }
         }
 
@@ -579,7 +621,7 @@ fn fires_twice_within_a_partition(schedule: &Expression, partitioning: Partition
 }
 
 fn check_templates(
-    node: &str,
+    node: &NodeSpec,
     path: &str,
     value: &toml::Value,
     upstreams: &BTreeSet<String>,
@@ -599,15 +641,21 @@ fn check_templates(
                 for upstream in template.upstream_nodes() {
                     if !upstreams.contains(upstream) && seen.insert(upstream) {
                         problems.push(Problem::UnknownTemplateUpstream {
-                            node: node.to_string(),
+                            node: node.name.clone(),
                             param: path.to_string(),
                             upstream: upstream.to_string(),
                         });
                     }
                 }
+                if node.each.is_none() && template.refers_to_item() {
+                    problems.push(Problem::ItemWithoutEach {
+                        node: node.name.clone(),
+                        param: path.to_string(),
+                    });
+                }
             }
             Err(e) => problems.push(Problem::InvalidTemplate {
-                node: node.to_string(),
+                node: node.name.clone(),
                 param: path.to_string(),
                 message: e.to_string(),
             }),
@@ -623,6 +671,31 @@ fn check_templates(
             }
         }
         _ => {}
+    }
+}
+
+fn check_each(node: &str, each: &str, upstreams: &BTreeSet<String>, problems: &mut Vec<Problem>) {
+    let template = match Template::parse(each) {
+        Ok(template) => template,
+        Err(e) => {
+            problems.push(Problem::InvalidEach {
+                node: node.to_string(),
+                message: e.to_string(),
+            });
+            return;
+        }
+    };
+    if template.refers_to_item() {
+        problems.push(Problem::EachRefersToItem(node.to_string()));
+    }
+    let mut seen = BTreeSet::new();
+    for upstream in template.upstream_nodes() {
+        if !upstreams.contains(upstream) && seen.insert(upstream) {
+            problems.push(Problem::UnknownEachUpstream {
+                node: node.to_string(),
+                upstream: upstream.to_string(),
+            });
+        }
     }
 }
 
@@ -705,6 +778,7 @@ mod tests {
             pool: "default".into(),
             retries: 0,
             params: r#"argv = ["true"]"#.parse().unwrap(),
+            each: None,
         }
     }
 
@@ -932,6 +1006,56 @@ mod tests {
                     upstream: "other".into(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn an_item_reference_requires_each_and_each_refers_to_upstreams_alone() {
+        let mapped = |each: &str, consumes: &[&str]| NodeSpec {
+            params: r#"argv = ["fetch", "{{ item.url }}"]"#.parse().unwrap(),
+            each: Some(each.into()),
+            ..asset("fetch", "pages", consumes)
+        };
+        let graph = build(vec![
+            asset("list", "urls", &[]),
+            mapped("{{ upstream.list.urls }}", &["urls"]),
+        ])
+        .unwrap();
+        assert_eq!(
+            graph.node("fetch").unwrap().each(),
+            Some("{{ upstream.list.urls }}")
+        );
+        assert_eq!(graph.node("list").unwrap().each(), None);
+
+        let mut once = mapped("", &["urls"]);
+        once.each = None;
+        assert_eq!(
+            build(vec![asset("list", "urls", &[]), once]),
+            Err(vec![Problem::ItemWithoutEach {
+                node: "fetch".into(),
+                param: "argv.1".into(),
+            }])
+        );
+        assert_eq!(
+            build(vec![
+                asset("list", "urls", &[]),
+                asset("other", "o", &[]),
+                mapped("{{ upstream.other }}{{ item }}", &["urls"]),
+            ]),
+            Err(vec![
+                Problem::EachRefersToItem("fetch".into()),
+                Problem::UnknownEachUpstream {
+                    node: "fetch".into(),
+                    upstream: "other".into(),
+                },
+            ])
+        );
+        assert_eq!(
+            build(vec![mapped("{{ upstream", &[])]),
+            Err(vec![Problem::InvalidEach {
+                node: "fetch".into(),
+                message: "`{{` at byte 0 is not closed".into(),
+            }])
         );
     }
 

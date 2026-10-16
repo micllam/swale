@@ -17,12 +17,12 @@
 //! run of every partition it lists ([`Scheduler::start_runs`]).
 //!
 //! The events worker submits the ready downstreams of a terminated task
-//! instance, and the reconciler ([`Scheduler::reconcile`]) submits every
-//! ready node of every active graph run. Each reads the node records of the
-//! run once, applies [`crate::readiness`] and writes the final state when
-//! the run is finished. The reconciler also cancels the active runs of a
-//! cancelled graph run. A lost event delays a graph run by one reconciler
-//! interval at most.
+//! instance, and the reconciler ([`Scheduler::reconcile`]) submits every ready
+//! node of every active graph run. Each reads the node records of the run once,
+//! applies [`crate::readiness`] and writes the final state when the run is
+//! finished. The reconciler also cancels the active runs of a cancelled graph
+//! run, with the active members of its mapped nodes. A lost event delays a
+//! graph run by one reconciler interval at most.
 //!
 //! A request from another process ([`Scheduler::handle_request`], in the
 //! [`crate::request`] module) starts graph runs, reruns a node or cancels a
@@ -394,8 +394,8 @@ impl Scheduler {
     }
 
     /// Cancels the graph run: writes the cancelled state with the settle time
-    /// and cancels every active task instance. `false` when the run does not
-    /// exist or is not active.
+    /// and cancels every active task instance and every active member of a
+    /// mapped node. `false` when the run does not exist or is not active.
     pub async fn cancel_run(&self, graph_name: &str, partition: &Partition) -> Result<bool, Error> {
         let key = records::graph_run_key(graph_name, partition);
         let Some((run, bytes)) = self.graph_run(&key).await? else {
@@ -821,8 +821,26 @@ impl Scheduler {
         ))
     }
 
-    /// Cancels the unrecorded task instance run of every node. Returns the
-    /// count of runs cancelled.
+    /// Removes the run group of every mapped node of `graph` for `partition`.
+    pub(crate) async fn forget_groups(
+        &self,
+        graph: &Graph,
+        partition: &Partition,
+    ) -> Result<(), Error> {
+        for node in graph.nodes().iter().filter(|node| node.each().is_some()) {
+            if let Some(runtime) = self.pools.runtime(node.pool()) {
+                runtime
+                    .group(task::group_id(graph.name(), partition, node.name()))
+                    .forget()
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Cancels the unrecorded task instance run of every node, and the active
+    /// members of such a node when it is a mapped node. Returns the count of
+    /// task instance runs cancelled.
     async fn cancel_active_runs(
         &self,
         graph: &Graph,
@@ -840,8 +858,14 @@ impl Scheduler {
                 continue;
             };
             let reason = Some(GRAPH_RUN_CANCELLED.to_string());
-            if runtime.cancel(&run_id, reason).await? != CancelRunOutcome::NotActive {
+            if runtime.cancel(&run_id, reason.clone()).await? != CancelRunOutcome::NotActive {
                 cancelled += 1;
+            }
+            if node.each().is_some() {
+                runtime
+                    .group(task::group_id(graph.name(), partition, node.name()))
+                    .cancel(reason)
+                    .await?;
             }
         }
         Ok(cancelled)
