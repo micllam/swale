@@ -2466,9 +2466,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slatedb"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb40332f41e231926df3a0ef742c05316b43368ba4b520433d2a1eba1ab00f0f"
+checksum = "543da8a0c19e1a6af286a3c314a1c936af598603f3af98549514fffffb837334"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -2511,9 +2511,9 @@ dependencies = [
 
 [[package]]
 name = "slatedb-common"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b77f238f348e95e1653a5235f880ac703011b82582bd556f2aba405abf8180e"
+checksum = "b5cb9fe0fa807c333fbb5880b222f5e72889fa22e40b2f13f479490d8b22f192"
 dependencies = [
  "chrono",
  "log",
@@ -2527,9 +2527,9 @@ dependencies = [
 
 [[package]]
 name = "slatedb-txn-obj"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ad63b6c250219e26d71f497820f970274c301f896366daa56915f2a05df0e0a"
+checksum = "872044a3b57e2846a3761619bab7cb88052034d137cf17afb2382c63a24c3b11"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2698,9 +2698,9 @@ dependencies = [
 
 [[package]]
 name = "taquba"
-version = "0.14.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e1224c60c6f1ef66ab11cf9e00bc49c7654ccb9d6ef1145764e0372a4632211"
+checksum = "33fd10f2d279a66f1539304248621e4418ad915daa614699be3b0aa196694568"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2713,13 +2713,14 @@ dependencies = [
  "tokio-util",
  "tracing",
  "ulid",
+ "url",
 ]
 
 [[package]]
 name = "taquba-cron"
-version = "0.11.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b642e00ee65b8663a57bd41ba8e7e85f1cb0a0a40a6e9bb1ad919a347e4c7e5a"
+checksum = "ac2ad36169862843f1ad87aaabc97ec05596b35bcac38c72bd451baafbf1545b"
 dependencies = [
  "chrono",
  "croner",
@@ -2731,9 +2732,9 @@ dependencies = [
 
 [[package]]
 name = "taquba-workflow"
-version = "0.13.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba6aa31e8932bd0710584d5b7731fe3ba6f7ebb2643656610f8dbbb4e0b773d2"
+checksum = "2aac8c4105dcdc1315cb62fcd371dae27b74132eac6f7c050f1c53e884166b24"
 dependencies = [
  "bytes",
  "futures-util",

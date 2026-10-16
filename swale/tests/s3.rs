@@ -19,7 +19,7 @@ use swale::JsonBytes;
 use swale::records::{GRAPH_RUNS_PREFIX, GraphRunRecord, GraphRunState};
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{ObjectStore, parse_url_opts};
-use taquba::{QueueReader, ReaderOptions};
+use taquba::{KvOrder, QueueReader, ReaderOptions};
 
 const LOCAL_EXAMPLE: &str = "examples/local.toml";
 
@@ -169,7 +169,7 @@ async fn daemon_adopts_a_published_graph_and_catches_up_on_the_url() {
         let prefix = format!("{GRAPH_RUNS_PREFIX}catch_up/");
         let page = reader
             .view()
-            .kv_scan(prefix.as_bytes(), .., 100)
+            .kv_scan(prefix.as_bytes(), .., KvOrder::Ascending, 100)
             .await
             .unwrap();
         complete = page

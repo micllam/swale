@@ -589,7 +589,7 @@ command = "printf '{{\"size\": {{{{ upstream.arrival.size }}}}}}'"
             .status(&run_id)
             .await
             .unwrap()
-            .filter(|status| status.current_step >= 1)
+            .filter(|status| status.step.number >= 1)
     })
     .await;
     std::fs::write(dir.join("orders-20260915.parquet"), b"12345").unwrap();

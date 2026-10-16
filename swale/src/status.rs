@@ -377,9 +377,12 @@ impl StatusReader {
 /// terminated run.
 fn instance_state(state: &RunState) -> Option<InstanceState> {
     match state {
-        RunState::Pending => Some(InstanceState::Pending),
+        RunState::Pending
+        | RunState::Scheduled { .. }
+        | RunState::Waiting { .. }
+        | RunState::DeadLettered => Some(InstanceState::Pending),
         RunState::Running => Some(InstanceState::Running),
-        RunState::Cancelling => Some(InstanceState::Cancelling),
+        RunState::Cancelling { .. } => Some(InstanceState::Cancelling),
         RunState::Terminated(_) => None,
     }
 }
@@ -400,7 +403,7 @@ fn graph_entry<'a>(
 
 #[cfg(test)]
 mod tests {
-    use taquba_workflow::{RunTermination, TerminalStatus};
+    use taquba_workflow::{RunTermination, StepRef, TerminalStatus};
 
     use super::*;
 
@@ -415,14 +418,21 @@ mod tests {
             Some(InstanceState::Running)
         );
         assert_eq!(
-            instance_state(&RunState::Cancelling),
+            instance_state(&RunState::Cancelling {
+                reason: None,
+                requested_at_ms: 0,
+            }),
             Some(InstanceState::Cancelling)
         );
         let terminated = RunTermination {
             status: TerminalStatus::Succeeded,
             error: None,
             error_kind: None,
-            final_step: 0,
+            cancelled_by: None,
+            final_step: StepRef {
+                number: 0,
+                job_id: "j".into(),
+            },
             terminated_at_ms: 0,
         };
         assert_eq!(instance_state(&RunState::Terminated(terminated)), None);

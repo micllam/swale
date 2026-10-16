@@ -41,7 +41,7 @@ use taquba::{
     WorkerError, WorkerHandle,
 };
 use taquba_cron::PREVIOUS_FIRE_MS_HEADER;
-use taquba_workflow::{RunId, RunOptions, RunSpec, RunState};
+use taquba_workflow::{CancelRunOutcome, RunId, RunOptions, RunSpec, RunState};
 use tokio_util::sync::CancellationToken;
 
 use crate::definition_store::{DefinitionError, DefinitionStore};
@@ -792,7 +792,7 @@ impl Scheduler {
             .expiry_entry(&self.expiry, settled_at_ms, &expiring.suffix());
         Ok(self
             .queue
-            .kv_compare_commit(&key, Some(expected), effects)
+            .kv_compare_commit(&[(&key, Some(expected))], effects)
             .await?
             .is_some())
     }
@@ -825,7 +825,7 @@ impl Scheduler {
             let Some(runtime) = self.pools.runtime(node.pool()) else {
                 continue;
             };
-            if runtime.cancel(&run_id).await? {
+            if runtime.cancel(&run_id, None).await? != CancelRunOutcome::NotActive {
                 cancelled += 1;
             }
         }

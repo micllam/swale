@@ -95,7 +95,8 @@ impl PoolsBuilder {
                 .max_concurrent_steps(concurrency)
                 .poll_interval(self.poll_interval)
                 .memo_retention(self.memo_retention)
-                .build();
+                .build()
+                .expect("the record hook accepts the queue of every runtime");
                 (name, runtime)
             })
             .collect();

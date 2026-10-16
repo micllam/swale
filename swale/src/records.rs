@@ -21,7 +21,7 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use taquba::{ExpiryIndex, KvRange, QueueView};
+use taquba::{ExpiryIndex, KvOrder, KvRange, QueueView};
 use taquba_workflow::TerminalStatus;
 
 use crate::graph::Node;
@@ -405,7 +405,7 @@ pub async fn scan<T: JsonBytes>(
     range: impl KvRange,
 ) -> Result<Vec<Entry<T>>, taquba::Error> {
     let mut records = Vec::new();
-    let mut entries = pin!(view.kv_entries(prefix, range, PAGE));
+    let mut entries = pin!(view.kv_entries(prefix, range, KvOrder::Ascending, PAGE));
     while let Some((key, bytes)) = entries.try_next().await? {
         match parse::<T>(&key, &bytes) {
             Ok(record) => records.push(Entry { key, bytes, record }),

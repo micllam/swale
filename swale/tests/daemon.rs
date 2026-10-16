@@ -18,7 +18,7 @@ use swale::{
 };
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{ObjectStore, ObjectStoreExt};
-use taquba::{MockClock, Queue};
+use taquba::{KvOrder, MockClock, Queue};
 use taquba_cron::{Backfill, BackfillStart, Schedule};
 use tokio_util::sync::CancellationToken;
 
@@ -679,7 +679,7 @@ async fn a_retention_pass_removes_the_records_of_settled_runs_and_of_requests_pa
         let page = h
             .queue
             .view()
-            .kv_scan(EXPIRY_PREFIX.as_bytes(), .., 100)
+            .kv_scan(EXPIRY_PREFIX.as_bytes(), .., KvOrder::Ascending, 100)
             .await
             .unwrap();
         page.entries

@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0 2,14 * * *` with a daily partition, fails the load with
   `Problem::ScheduleWithinPartition`. Such a graph changes its schedule or its
   partition.
+- **Breaking:** swale depends on `taquba` 0.16, `taquba-workflow` 0.15 and
+  `taquba-cron` 0.13, which fail to decode the records of a task instance and
+  the notification jobs of 0.2.0. Before the upgrade, drain the queues and wait
+  for the memo retention of the pools to remove the records of 0.2.0.
 
 ### Fixed
 

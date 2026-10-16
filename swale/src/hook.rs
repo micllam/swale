@@ -106,7 +106,7 @@ impl TerminalHook for RecordHook {
 #[cfg(test)]
 mod tests {
     use taquba::MockClock;
-    use taquba_workflow::RunId;
+    use taquba_workflow::{RunId, StepRef};
 
     use super::*;
 
@@ -131,8 +131,12 @@ mod tests {
             status,
             result: result.map(<[u8]>::to_vec),
             error: error.map(str::to_string),
+            cancelled_by: None,
             headers: identity().headers(),
-            final_step: 0,
+            final_step: StepRef {
+                number: 0,
+                job_id: "j".into(),
+            },
         }
     }
 
