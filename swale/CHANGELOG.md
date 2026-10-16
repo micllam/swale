@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `taquba-cron` 0.13, which fail to decode the records of a task instance and
   the notification jobs of 0.2.0. Before the upgrade, drain the queues and wait
   for the memo retention of the pools to remove the records of 0.2.0.
+- The record and the event of a task instance commit in the settlement that
+  terminates it, so a terminated task instance has its record. The pools do not
+  enqueue a notification job, and `RecordHook::observes` returns `false`.
 
 ### Fixed
 

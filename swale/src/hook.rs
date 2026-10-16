@@ -1,6 +1,6 @@
 //! The terminal hook of every pool: it writes the node's record and enqueues
-//! the event for the scheduler, and both commit with the notification's
-//! acknowledgement.
+//! the event for the scheduler, and both commit with the termination of the
+//! task instance.
 
 use std::sync::Arc;
 
@@ -74,32 +74,44 @@ impl RecordHook {
 }
 
 impl TerminalHook for RecordHook {
+    fn observes(&self, _outcome: &RunOutcome) -> bool {
+        false
+    }
+
     async fn on_termination(
         &self,
-        outcome: &RunOutcome,
-        effects: &TerminalEffects,
+        _outcome: &RunOutcome,
+        _effects: &TerminalEffects,
     ) -> Result<(), StepError> {
-        let identity = TaskIdentity::from_headers(&outcome.headers).map_err(|e| {
-            StepError::permanent(format!("the headers do not identify a task: {e}"))
-        })?;
+        Ok(())
+    }
+
+    fn stage_effects(&self, outcome: &RunOutcome, effects: &TerminalEffects) {
+        let identity = match TaskIdentity::from_headers(&outcome.headers) {
+            Ok(identity) => identity,
+            Err(e) => {
+                tracing::error!(run = %outcome.run_id, error = %e, "the headers do not identify a task");
+                return;
+            }
+        };
         let record = self.record(&identity, outcome);
-        effects
-            .put(identity.record_key(), record.to_bytes())
-            .map_err(|e| StepError::permanent(e.to_string()))?;
+        let key = identity.record_key();
         let event = Event {
             graph: identity.graph,
             partition: identity.partition,
             node: identity.node,
             status: record.status,
         };
-        effects
-            .enqueue(EnqueueRequest {
+        let staged = effects.put(key, record.to_bytes()).and_then(|()| {
+            effects.enqueue(EnqueueRequest {
                 queue: EVENTS_QUEUE.to_string(),
                 payload: event.to_bytes(),
                 options: EnqueueOptions::default().dedup_key(format!("evt:{}", outcome.run_id)),
             })
-            .map_err(|e| StepError::permanent(e.to_string()))?;
-        Ok(())
+        });
+        if let Err(e) = staged {
+            tracing::error!(run = %outcome.run_id, error = %e, "the record was not staged");
+        }
     }
 }
 
