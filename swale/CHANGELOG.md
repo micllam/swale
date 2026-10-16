@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The record and the event of a task instance commit in the settlement that
   terminates it, so a terminated task instance has its record. The pools do not
   enqueue a notification job, and `RecordHook::observes` returns `false`.
+- **Breaking:** `store::provider_options` is removed, and `taquba::open_url`
+  reads the same provider options. Pass the URL and `std::env::vars()` to
+  `taquba::open_url` in place of `provider_options` and `parse_url_opts`.
+- **Breaking:** the commands and the `object_exists` operator panic when a
+  variable of the environment is not UTF-8, where 0.2.0 omitted the variable.
+  Before the upgrade, remove such a variable from the environment of swale.
 
 ### Fixed
 

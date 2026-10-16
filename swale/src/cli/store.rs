@@ -7,14 +7,14 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use swale::store::{provider_options, store_path};
+use swale::store::store_path;
 use swale::{
     DefinitionStore, OperatorSet, Pools, RecordHook, RequestStore, Scheduler, StatusReader,
 };
 use taquba::Queue;
+use taquba::object_store::ObjectStore;
 use taquba::object_store::local::LocalFileSystem;
 use taquba::object_store::path::Path as ObjectPath;
-use taquba::object_store::{ObjectStore, parse_url_opts};
 
 use super::CommandResult;
 
@@ -119,13 +119,11 @@ pub(crate) fn open_store(arg: StoreArg) -> Result<Store, Box<dyn std::error::Err
     open_location(&store_location(arg)?)
 }
 
-/// Opens the store at `location`: a directory, or an object store URL with
-/// the path in the URL as the store prefix.
+/// Opens the store at `location`: a directory, or an object store URL with the
+/// path in the URL as the store prefix.
 fn open_location(location: &str) -> Result<Store, Box<dyn std::error::Error>> {
     let (objects, prefix): (Arc<dyn ObjectStore>, ObjectPath) = if location.contains("://") {
-        let url = url::Url::parse(location)?;
-        let (store, prefix) = parse_url_opts(&url, provider_options(std::env::vars_os()))?;
-        (Arc::from(store), prefix)
+        taquba::open_url(location, std::env::vars())?
     } else {
         (
             Arc::new(LocalFileSystem::new_with_prefix(location)?),

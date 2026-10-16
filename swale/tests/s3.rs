@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use swale::JsonBytes;
 use swale::records::{GRAPH_RUNS_PREFIX, GraphRunRecord, GraphRunState};
+use taquba::object_store::ObjectStore;
 use taquba::object_store::path::Path as ObjectPath;
-use taquba::object_store::{ObjectStore, parse_url_opts};
 use taquba::{KvOrder, QueueReader, ReaderOptions};
 
 const LOCAL_EXAMPLE: &str = "examples/local.toml";
@@ -48,12 +48,7 @@ fn base_url() -> String {
 /// The object store of `url` and the path of the URL within it, opened as the
 /// command opens them.
 fn open(url: &str) -> (Arc<dyn ObjectStore>, ObjectPath) {
-    let options = std::env::vars().filter_map(|(name, value)| {
-        let key = name.to_ascii_lowercase();
-        key.starts_with("aws_").then_some((key, value))
-    });
-    let (store, path) = parse_url_opts(&url::Url::parse(url).unwrap(), options).unwrap();
-    (Arc::from(store), path)
+    taquba::open_url(url, std::env::vars()).unwrap()
 }
 
 /// The names of the entries directly within `path`. An object directly

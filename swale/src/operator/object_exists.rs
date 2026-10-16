@@ -15,12 +15,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use taquba::object_store::path::Path as ObjectPath;
-use taquba::object_store::{self, ObjectStore, ObjectStoreExt, ObjectStoreScheme, parse_url_opts};
+use taquba::object_store::{self, ObjectStore, ObjectStoreExt, ObjectStoreScheme};
 use taquba_workflow::StepError;
 
 use super::{Operator, Outcome, Task};
 use crate::duration;
-use crate::store::provider_options;
 
 /// Parameters of the `object_exists` operator.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -69,9 +68,13 @@ impl ObjectExists {
         let store = match stores.get(&origin) {
             Some(store) => store.clone(),
             None => {
-                let (store, _) = parse_url_opts(url, provider_options(std::env::vars_os()))
-                    .map_err(|e| StepError::permanent(format!("`{url}` does not open: {e}")))?;
-                let store: Arc<dyn ObjectStore> = Arc::from(store);
+                let (store, _) = taquba::open_url(url.as_str(), std::env::vars()).map_err(|e| {
+                    let reason = match e {
+                        taquba::Error::InvalidStoreUrl { source, .. } => source.to_string(),
+                        e => e.to_string(),
+                    };
+                    StepError::permanent(format!("`{url}` does not open: {reason}"))
+                })?;
                 stores.insert(origin, store.clone());
                 store
             }
