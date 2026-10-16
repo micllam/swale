@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use swale::JsonBytes;
-use swale::records::{GraphRunState, graph_key};
+use swale::records::{GraphRunState, graph_key, graph_run_key};
 use swale::{
     DefinitionStore, GraphRecord, GraphRunStatus, InstanceState, NodeState, OperatorSet, Partition,
     Pools, RecordHook, RunCounts, Scheduler, SchedulerOptions, StatusReader, TaskInstance,
@@ -144,7 +144,7 @@ impl Harness {
             &format!("no reader saw the graph run in {state:?}"),
             async || {
                 let reader = self.reader().await;
-                let runs = reader.runs("orders", None).await.unwrap();
+                let runs = reader.runs("orders", None, 1).await.unwrap();
                 if runs.first().is_some_and(|run| run.record.state == state) {
                     return Some(reader);
                 }
@@ -213,11 +213,11 @@ async fn a_failed_run_reads_with_its_counts_its_blocked_node_and_its_dead_job() 
     let latest = graphs[0].latest.as_ref().unwrap();
     assert_eq!(latest.partition, Harness::partition());
 
-    let runs = reader.runs("orders", None).await.unwrap();
+    let runs = reader.runs("orders", None, 20).await.unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].record.state, GraphRunState::Failed);
     assert_eq!(runs[0].record.requested_at_ms, START_MS);
-    assert!(reader.runs("order", None).await.unwrap().is_empty());
+    assert!(reader.runs("order", None, 20).await.unwrap().is_empty());
 
     let run = reader
         .run("orders", &Harness::partition())
@@ -304,7 +304,7 @@ async fn an_active_run_without_workers_has_a_pending_root_instance_and_waiting_d
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn runs_list_from_a_partition_onward() {
+async fn runs_list_the_latest_partitions_from_a_partition_onward() {
     let h = Harness::start(DEFINITION, false).await;
     for partition in ["20260914", "20260915", "20260916"] {
         h.scheduler
@@ -312,23 +312,39 @@ async fn runs_list_from_a_partition_onward() {
             .await
             .unwrap();
     }
+    // A record that does not parse, at the latest partition.
+    let malformed = graph_run_key("orders", &Partition::new("20260917").unwrap());
+    h.queue.kv_put(&malformed, b"not json").await.unwrap();
 
     let reader = h.reader().await;
-    let partitions = async |from: Option<&str>| {
+    let partitions = async |from: Option<&str>, limit: usize| {
         let from = from.map(|p| Partition::new(p).unwrap());
         reader
-            .runs("orders", from.as_ref())
+            .runs("orders", from.as_ref(), limit)
             .await
             .unwrap()
             .into_iter()
             .map(|run| run.partition.to_string())
             .collect::<Vec<_>>()
     };
-    assert_eq!(partitions(None).await, ["20260914", "20260915", "20260916"]);
-    assert_eq!(partitions(Some("20260915")).await, ["20260915", "20260916"]);
+    assert_eq!(
+        partitions(None, 20).await,
+        ["20260914", "20260915", "20260916"]
+    );
+    assert_eq!(partitions(None, 2).await, ["20260915", "20260916"]);
+    assert_eq!(partitions(None, 1).await, ["20260916"]);
+    assert_eq!(
+        partitions(None, usize::MAX).await,
+        ["20260914", "20260915", "20260916"]
+    );
+    assert_eq!(
+        partitions(Some("20260915"), 20).await,
+        ["20260915", "20260916"]
+    );
+    assert_eq!(partitions(Some("20260914"), 1).await, ["20260916"]);
     // A start partition without a graph run begins the listing after it.
-    assert_eq!(partitions(Some("20260915T12")).await, ["20260916"]);
-    assert!(partitions(Some("20260917")).await.is_empty());
+    assert_eq!(partitions(Some("20260915T12"), 20).await, ["20260916"]);
+    assert!(partitions(Some("20260917"), 20).await.is_empty());
     reader.close().await.unwrap();
 }
 

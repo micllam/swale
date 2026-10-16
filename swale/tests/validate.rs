@@ -105,6 +105,8 @@ fn usage_error_has_status_2() {
             .unwrap()
             .contains("Usage: swale")
     );
+    let output = swale(&["status", "orders", "--limit", "0"], None);
+    assert_eq!(output.status.code(), Some(2));
 }
 
 const LOCAL_EXAMPLE: &str = "examples/local.toml";

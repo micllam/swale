@@ -136,7 +136,11 @@ enum Command {
         #[arg(long, value_parser = parse_partition_arg)]
         from: Option<Partition>,
         /// The graph runs listed, the latest partitions at or after `from`.
-        #[arg(long, default_value_t = 20)]
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+        )]
         limit: usize,
     },
     /// Prints the job counts of every queue of a store, or the dead jobs

@@ -15,9 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `StatusReader::open` or `StatusReader::new` passes the store prefix, within
   which the pools write their memos, and `StatusReader::new` also takes the
   object store.
-- `swale status <graph> --from <partition>` lists the graph runs at or after a
-  partition, and the read starts at that partition. `StatusReader::runs` takes
-  the start partition as an `Option`, and `records::scan` takes a `KvRange`.
+- `swale status <graph> --from <partition>` lists the latest graph runs at or
+  after a partition, and the read starts at the latest partition. `--limit` must
+  be 1 or more. `StatusReader::runs` takes the start partition as an `Option`
+  and the limit, and `records::scan` takes a `KvRange`.
 - The `subprocess` and `shell` operators kill a program whose run time exceeds
   `timeout`, and the attempt fails with a transient error. `SubprocessParams`
   and `ShellParams` require `timeout`.

@@ -63,7 +63,7 @@ async fn print_status(
         return Ok(());
     };
     let Some(partition) = partition else {
-        let runs = reader.runs(graph, from).await?;
+        let runs = reader.runs(graph, from, limit).await?;
         if runs.is_empty() {
             return Err(match from {
                 Some(from) => {
@@ -75,7 +75,7 @@ async fn print_status(
         }
         let header = ["PARTITION", "STATE", "REQUESTED", "DEFINITION"];
         let mut rows = Vec::new();
-        for run in &runs[runs.len().saturating_sub(limit)..] {
+        for run in &runs {
             rows.push([
                 run.partition.to_string(),
                 run.record.state.to_string(),

@@ -243,12 +243,13 @@ impl StatusReader {
         Ok(graphs.into_values().collect())
     }
 
-    /// The graph runs of `graph` in partition order, at or after the partition
-    /// `from` when given. The read starts at the key of `from`.
+    /// The latest `limit` graph runs of `graph` in partition order, at or after
+    /// the partition `from` when given. The read starts at the last key.
     pub async fn runs(
         &self,
         graph: &str,
         from: Option<&Partition>,
+        limit: usize,
     ) -> Result<Vec<RunSummary>, Error> {
         let prefix = format!("{GRAPH_RUNS_PREFIX}{graph}/");
         let start = from.map(|partition| records::graph_run_key(graph, partition));
@@ -258,7 +259,7 @@ impl StatusReader {
         );
         let mut runs = Vec::new();
         let entries: Vec<Entry<GraphRunRecord>> =
-            records::scan(self.reader.view(), prefix.as_bytes(), range).await?;
+            records::scan_last(self.reader.view(), prefix.as_bytes(), range, limit).await?;
         for Entry { key, record, .. } in entries {
             let Some((_, partition)) = records::parse_graph_run_key(&key) else {
                 continue;

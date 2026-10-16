@@ -407,12 +407,41 @@ pub async fn scan<T: JsonBytes>(
     let mut records = Vec::new();
     let mut entries = pin!(view.kv_entries(prefix, range, KvOrder::Ascending, PAGE));
     while let Some((key, bytes)) = entries.try_next().await? {
-        match parse::<T>(&key, &bytes) {
-            Ok(record) => records.push(Entry { key, bytes, record }),
-            Err(e) => tracing::warn!(error = %e, "record skipped"),
-        }
+        records.extend(entry(key, bytes));
     }
     Ok(records)
+}
+
+/// The last `limit` records with `prefix` whose key is within `range`, in key
+/// order, read from the last key a page at a time. A value that is not a `T` is
+/// logged and skipped, and the read continues past it.
+pub(crate) async fn scan_last<T: JsonBytes>(
+    view: &QueueView,
+    prefix: &[u8],
+    range: impl KvRange,
+    limit: usize,
+) -> Result<Vec<Entry<T>>, taquba::Error> {
+    let mut records = Vec::new();
+    let mut entries = pin!(view.kv_entries(prefix, range, KvOrder::Descending, limit.min(PAGE)));
+    while records.len() < limit
+        && let Some((key, bytes)) = entries.try_next().await?
+    {
+        records.extend(entry(key, bytes));
+    }
+    records.reverse();
+    Ok(records)
+}
+
+/// The entry of a listed record, or `None` with a warning for a value that is
+/// not a `T`.
+fn entry<T: JsonBytes>(key: Vec<u8>, bytes: Bytes) -> Option<Entry<T>> {
+    match parse::<T>(&key, &bytes) {
+        Ok(record) => Some(Entry { key, bytes, record }),
+        Err(e) => {
+            tracing::warn!(error = %e, "record skipped");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
