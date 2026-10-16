@@ -9,12 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `swale status <graph> <partition>` shows the task instance of a node that
-  the runtime of its pool has, `pending`, `running` or `cancelling`, with its
-  run id, and `NodeStatus` records it in `instance`. A caller of
-  `StatusReader::open` or `StatusReader::new` passes the store prefix, within
-  which the pools write their memos, and `StatusReader::new` also takes the
-  object store.
+- `swale status <graph> <partition>` shows the state, the run id and the member
+  counts of a task instance that has not terminated, and `NodeStatus` records
+  them in `instance`. A caller of `StatusReader::open` or `StatusReader::new`
+  passes the store prefix, within which the pools write their memos, and
+  `StatusReader::new` also takes the object store.
 - `swale status <graph> --from <partition>` lists the latest graph runs at or
   after a partition, and the read starts at the latest partition. `--limit` must
   be 1 or more. `StatusReader::runs` takes the start partition as an `Option`

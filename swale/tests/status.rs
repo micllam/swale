@@ -7,11 +7,13 @@ use std::time::Duration;
 use swale::JsonBytes;
 use swale::records::{GraphRunState, graph_key, graph_run_key};
 use swale::{
-    DefinitionStore, GraphRecord, GraphRunStatus, InstanceState, NodeState, OperatorSet, Partition,
-    Pools, RecordHook, RunCounts, Scheduler, SchedulerOptions, StatusReader, TaskInstance,
+    DefinitionStore, GraphRecord, GraphRunStatus, InstanceState, MemberCounts, NodeState,
+    OperatorSet, Partition, Pools, RecordHook, RunCounts, Scheduler, SchedulerOptions,
+    StatusReader, TaskInstance,
 };
 use taquba::object_store::ObjectStore;
 use taquba::{MockClock, Queue};
+use taquba_workflow::{GroupMember, RunOptions};
 use tokio_util::sync::CancellationToken;
 
 mod common;
@@ -72,11 +74,27 @@ operator = "shell"
 command = 'case "$SWALE_RUN_ID" in *-r0) exit 3;; *) sleep 60;; esac'
 "#;
 
+/// `fan` runs a member per item. The members of items 1 and 2 succeed, and the
+/// member of item 3 runs for a minute.
+const MAPPED: &str = r#"
+[graph]
+name = "orders"
+partition = "daily"
+
+[[node]]
+name = "fan"
+operator = "shell"
+each = "[1, 2, 3]"
+[node.params]
+command = "test {{ item }} -eq 3 && sleep 60; printf '{{ item }}'"
+"#;
+
 struct Harness {
     store: Arc<dyn ObjectStore>,
     queue: Arc<Queue>,
     definitions: Arc<DefinitionStore>,
     scheduler: Arc<Scheduler>,
+    pools: Arc<Pools>,
     hash: String,
     stop: CancellationToken,
 }
@@ -117,6 +135,7 @@ impl Harness {
             queue,
             definitions,
             scheduler,
+            pools,
             hash,
             stop,
         }
@@ -298,6 +317,7 @@ async fn an_active_run_without_workers_has_a_pending_root_instance_and_waiting_d
         Some(TaskInstance {
             run_id: "orders-20260915-extract-r0".into(),
             state: InstanceState::Pending,
+            members: None,
         })
     );
     assert!(run.nodes[1..].iter().all(|node| node.instance.is_none()));
@@ -382,6 +402,74 @@ async fn a_failed_node_with_a_running_rerun_reads_its_record_and_its_instance() 
         Some(TaskInstance {
             run_id: "orders-20260915-flaky-r1".into(),
             state: InstanceState::Running,
+            members: None,
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scheduled_mapped_node_reads_with_its_member_counts() {
+    let h = Harness::start(MAPPED, true).await;
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+
+    let run = h
+        .run_when(|run| {
+            run.nodes[0].instance.as_ref().is_some_and(|instance| {
+                instance.state == InstanceState::Scheduled
+                    && instance
+                        .members
+                        .is_some_and(|members| members.succeeded == 2)
+            })
+        })
+        .await;
+    assert_eq!(
+        run.nodes[0].instance,
+        Some(TaskInstance {
+            run_id: "orders-20260915-fan-r0".into(),
+            state: InstanceState::Scheduled,
+            members: Some(MemberCounts {
+                total: 3,
+                pending: 1,
+                succeeded: 2,
+                failed: 0,
+                cancelled: 0,
+            }),
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mapped_node_at_its_first_step_has_no_member_counts() {
+    let h = Harness::start(MAPPED, false).await;
+    // The group of an earlier task instance of the node.
+    h.pools
+        .runtime("default")
+        .unwrap()
+        .group("orders-20260915-fan".parse().unwrap())
+        .submit(
+            vec![GroupMember {
+                key: "0".into(),
+                input: b"{}".to_vec(),
+            }],
+            &RunOptions::default(),
+        )
+        .await
+        .unwrap();
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+
+    let run = h.run_when(|run| run.nodes[0].instance.is_some()).await;
+    assert_eq!(
+        run.nodes[0].instance,
+        Some(TaskInstance {
+            run_id: "orders-20260915-fan-r0".into(),
+            state: InstanceState::Pending,
+            members: None,
         })
     );
 }

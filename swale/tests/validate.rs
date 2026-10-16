@@ -343,11 +343,11 @@ fn status_and_queues_commands_print_a_failed_run_and_never_create_a_store() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("\nfirst   default  failed   -         local-none-first-r0  "),
+        stdout.contains("\nfirst   default  failed   -         -        local-none-first-r0  "),
         "{stdout}"
     );
     assert!(
-        stdout.contains("\nsecond  default  blocked  -         -"),
+        stdout.contains("\nsecond  default  blocked  -         -        -"),
         "{stdout}"
     );
     assert!(

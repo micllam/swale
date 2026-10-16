@@ -155,14 +155,16 @@ its credentials. The default store is `~/.swale/store`.
 on the store of a running daemon opens a second writer, and the store then
 refuses the writes of the daemon.
 
-`swale status` lists the graphs of a store with the count of their graph runs
-in each state. `swale status <graph>` lists the latest graph runs of the graph,
+`swale status` lists the graphs of a store with the count of their graph runs in
+each state. `swale status <graph>` lists the latest graph runs of the graph,
 from the partition of `--from` when given, and `swale status <graph>
-<partition>` lists the nodes of one graph run. A node
-without a record is `ready`, `waiting` or `blocked`. A blocked node does not run
-until a rerun changes the record of an upstream. The listing shows the task
-instance of a node that the runtime of its pool has, `pending`, `running` or
-`cancelling`, with its run id.
+<partition>` lists the nodes of one graph run.
+
+A node without a record is `ready`, `waiting` or `blocked`. A blocked node does
+not run until a rerun changes the record of an upstream. For a task instance
+that has not terminated, the listing shows its state, such as `pending`,
+`scheduled` or `running`, and its run id. For a mapped node, it also shows the
+count of the terminated members and the count of all members.
 
 `swale queues` lists the job counts of every queue, and `swale queues <queue>`
 lists the dead jobs of one queue. Both commands only read from the store, so
@@ -195,10 +197,10 @@ local/none: started, 1 root node(s) submitted
 local/none: complete
 $ swale status local none --store ./swale-store
 local/none: complete, requested 2026-09-17T13:48:19Z, definition 9450f82715de
-NODE    POOL     STATE      INSTANCE  RUN                   TERMINATED
-first   default  succeeded  -         local-none-first-r0   2026-09-17T13:48:19Z
-second  default  succeeded  -         local-none-second-r0  2026-09-17T13:48:20Z
-third   default  succeeded  -         local-none-third-r0   2026-09-17T13:48:26Z
+NODE    POOL     STATE      INSTANCE  MEMBERS  RUN                   TERMINATED
+first   default  succeeded  -         -        local-none-first-r0   2026-09-17T13:48:19Z
+second  default  succeeded  -         -        local-none-second-r0  2026-09-17T13:48:20Z
+third   default  succeeded  -         -        local-none-third-r0   2026-09-17T13:48:26Z
 $ swale publish examples/orders_daily.toml --store s3://bucket/swale
 orders_daily: published ac04ecabf07dc9a6d74c698a89e90f5d36c0da5ae659b6bcf7c81f4880590628
 $ swale daemon --store s3://bucket/swale --pool warehouse=2

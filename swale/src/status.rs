@@ -23,7 +23,7 @@ use taquba::{
     InboxOutcome, JobRecord, JobStatus, QueueReader, QueueStats, ReaderMode, ReaderOptions,
     Rejection,
 };
-use taquba_workflow::{MemoStore, RunState, WorkflowView};
+use taquba_workflow::{GroupStatus, MemoStore, RunId, RunState, WorkflowView};
 
 use crate::definition_store::{DefinitionError, DefinitionStore};
 use crate::partition::Partition;
@@ -104,21 +104,32 @@ pub struct GraphStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstanceState {
-    /// The task instance waits in the queue of its pool, or for a retry.
+    /// The task instance waits in the queue of its pool for a worker.
     Pending,
+    /// The task instance waits for a delay: a retry, or the next read of a
+    /// sensor or of the members of a mapped node.
+    Scheduled,
+    /// The task instance waits for a signal.
+    Waiting,
     /// A worker of the pool runs the task instance.
     Running,
     /// The graph run is cancelled, and the task instance did not terminate.
     Cancelling,
+    /// The queue dead-lettered the task instance outside a worker, and a worker
+    /// of the pool terminates it as failed.
+    DeadLettered,
 }
 
 impl InstanceState {
-    /// The lowercase name, as in the JSON form.
+    /// The name of the JSON form.
     pub fn as_str(&self) -> &'static str {
         match self {
             InstanceState::Pending => "pending",
+            InstanceState::Scheduled => "scheduled",
+            InstanceState::Waiting => "waiting",
             InstanceState::Running => "running",
             InstanceState::Cancelling => "cancelling",
+            InstanceState::DeadLettered => "dead_lettered",
         }
     }
 }
@@ -153,6 +164,43 @@ pub struct TaskInstance {
     pub run_id: String,
     /// The state.
     pub state: InstanceState,
+    /// The member counts of a mapped node, or `None` for a node without `each`
+    /// and at the first step of the task instance, which submits the members.
+    pub members: Option<MemberCounts>,
+}
+
+/// The members of a mapped node, counted by state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MemberCounts {
+    /// The members of the node.
+    pub total: usize,
+    /// The members submitted and not terminated.
+    pub pending: usize,
+    /// The succeeded members.
+    pub succeeded: usize,
+    /// The failed members.
+    pub failed: usize,
+    /// The cancelled members.
+    pub cancelled: usize,
+}
+
+impl MemberCounts {
+    /// The terminated members.
+    pub fn terminated(&self) -> usize {
+        self.succeeded + self.failed + self.cancelled
+    }
+}
+
+impl From<GroupStatus> for MemberCounts {
+    fn from(status: GroupStatus) -> Self {
+        MemberCounts {
+            total: status.total,
+            pending: status.pending,
+            succeeded: status.succeeded,
+            failed: status.failed,
+            cancelled: status.cancelled,
+        }
+    }
 }
 
 /// A node of a graph run.
@@ -167,7 +215,7 @@ pub struct NodeStatus {
     /// The node record, current or superseded by a rerun.
     pub record: Option<NodeRecord>,
     /// The task instance at the run id of [`task::unrecorded_run_id`], while
-    /// the runtime of the pool has it as pending, running or cancelling.
+    /// the runtime of the pool has not terminated it.
     pub instance: Option<TaskInstance>,
 }
 
@@ -321,16 +369,15 @@ impl StatusReader {
             let instance =
                 match task::unrecorded_run_id(&definition, partition, &record, node, &node_records)
                 {
-                    Some(run_id) => views
-                        .entry(node.pool())
-                        .or_insert_with(|| self.pool_view(node.pool()))
-                        .status(&run_id)
-                        .await?
-                        .and_then(|status| instance_state(&status.state))
-                        .map(|state| TaskInstance {
-                            run_id: run_id.to_string(),
-                            state,
-                        }),
+                    Some(run_id) => {
+                        let view = views
+                            .entry(node.pool())
+                            .or_insert_with(|| self.pool_view(node.pool()));
+                        let group = node
+                            .each()
+                            .map(|_| task::group_id(graph, partition, node.name()));
+                        instance(view, &run_id, group.as_ref()).await?
+                    }
                     None => None,
                 };
             nodes.push(NodeStatus {
@@ -416,16 +463,43 @@ impl StatusReader {
     }
 }
 
+/// The task instance at `run_id` with the member counts of the run group
+/// `group` after its first step, or `None` for a run that `view` does not have
+/// or that has terminated.
+async fn instance(
+    view: &WorkflowView,
+    run_id: &RunId,
+    group: Option<&RunId>,
+) -> Result<Option<TaskInstance>, Error> {
+    let Some(status) = view.status(run_id).await? else {
+        return Ok(None);
+    };
+    let Some(state) = instance_state(&status.state) else {
+        return Ok(None);
+    };
+    let members = match group {
+        Some(group) if status.step.number > 0 => {
+            view.group_status(group).await?.map(MemberCounts::from)
+        }
+        _ => None,
+    };
+    Ok(Some(TaskInstance {
+        run_id: run_id.to_string(),
+        state,
+        members,
+    }))
+}
+
 /// The state of a task instance from the state of its run, or `None` for a
 /// terminated run.
 fn instance_state(state: &RunState) -> Option<InstanceState> {
     match state {
-        RunState::Pending
-        | RunState::Scheduled { .. }
-        | RunState::Waiting { .. }
-        | RunState::DeadLettered => Some(InstanceState::Pending),
+        RunState::Pending => Some(InstanceState::Pending),
+        RunState::Scheduled { .. } => Some(InstanceState::Scheduled),
+        RunState::Waiting { .. } => Some(InstanceState::Waiting),
         RunState::Running => Some(InstanceState::Running),
         RunState::Cancelling { .. } => Some(InstanceState::Cancelling),
+        RunState::DeadLettered => Some(InstanceState::DeadLettered),
         RunState::Terminated(_) => None,
     }
 }
@@ -451,22 +525,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_terminated_run_is_not_an_instance() {
-        assert_eq!(
-            instance_state(&RunState::Pending),
-            Some(InstanceState::Pending)
-        );
-        assert_eq!(
-            instance_state(&RunState::Running),
-            Some(InstanceState::Running)
-        );
-        assert_eq!(
-            instance_state(&RunState::Cancelling {
-                reason: None,
-                requested_at_ms: 0,
-            }),
-            Some(InstanceState::Cancelling)
-        );
+    fn every_run_state_but_a_termination_is_an_instance_state() {
+        let waiting = RunState::Waiting { timeout_at_ms: 0 };
+        let cancelling = RunState::Cancelling {
+            reason: None,
+            requested_at_ms: 0,
+        };
+        for (state, instance) in [
+            (RunState::Pending, InstanceState::Pending),
+            (
+                RunState::Scheduled { run_at_ms: 0 },
+                InstanceState::Scheduled,
+            ),
+            (waiting, InstanceState::Waiting),
+            (RunState::Running, InstanceState::Running),
+            (cancelling, InstanceState::Cancelling),
+            (RunState::DeadLettered, InstanceState::DeadLettered),
+        ] {
+            assert_eq!(instance_state(&state), Some(instance));
+        }
         let terminated = RunTermination {
             status: TerminalStatus::Succeeded,
             error: None,
@@ -479,6 +556,6 @@ mod tests {
             terminated_at_ms: 0,
         };
         assert_eq!(instance_state(&RunState::Terminated(terminated)), None);
-        assert_eq!(InstanceState::Cancelling.to_string(), "cancelling");
+        assert_eq!(InstanceState::DeadLettered.to_string(), "dead_lettered");
     }
 }
