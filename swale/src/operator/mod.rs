@@ -59,7 +59,7 @@ pub struct Task<'a> {
 /// transient for a retry, permanent for a dead-letter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The task instance succeeded with this output.
+    /// The task instance succeeded, with the value as its output.
     Succeeded(Value),
     /// The task instance failed with this reason.
     Failed(String),
