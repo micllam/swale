@@ -125,7 +125,7 @@ impl Node {
         &self.spec.kind
     }
 
-    /// The asset the node produces, absent for a task node.
+    /// The asset the node produces, or `None` for a task node.
     pub fn asset(&self) -> Option<&str> {
         match &self.spec.kind {
             NodeKind::Asset { produces, .. } => Some(produces),
@@ -499,7 +499,7 @@ impl Graph {
         &self.name
     }
 
-    /// The cron expression, absent for a graph run by target requests only.
+    /// The cron expression, or `None` for a graph run by target requests only.
     /// It displays as the text the parser normalises, so `0 9 * * mon-fri`
     /// displays as `0 9 * * 1-5`.
     pub fn schedule(&self) -> Option<&Expression> {

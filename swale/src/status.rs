@@ -89,7 +89,7 @@ pub struct RunSummary {
 pub struct GraphStatus {
     /// The graph name.
     pub name: String,
-    /// The graph record, absent for a graph that the daemon did not adopt.
+    /// The graph record, or `None` for a graph that the daemon did not adopt.
     pub adopted: Option<GraphRecord>,
     /// The count of the graph runs in each state.
     pub runs: RunCounts,

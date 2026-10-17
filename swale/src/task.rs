@@ -32,7 +32,7 @@ pub struct TaskIdentity {
     pub partition: Partition,
     /// The node name.
     pub node: String,
-    /// The asset the node produces, absent for a task node.
+    /// The asset the node produces, or `None` for a task node.
     pub asset: Option<String>,
     /// The definition hash the graph run records.
     pub definition: String,
