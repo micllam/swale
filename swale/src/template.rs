@@ -7,7 +7,7 @@
 //! - `{{ run.<field> }}`, a field of the run: `id`, the run id of the task
 //!   instance, or `summary`, the summary of the graph run as JSON text.
 //! - `{{ upstream.<node>.<path> }}`, the output of an upstream node, or the
-//!   value at a dotted path into it.
+//!   value at a dotted path into it, such as `rows.0.id`.
 //! - `{{ env.<NAME> }}`, an environment variable of the process that renders
 //!   the template.
 //!

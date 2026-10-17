@@ -300,7 +300,8 @@ pub enum Problem {
     InvalidTemplate {
         /// The node.
         node: String,
-        /// The parameter path, dotted.
+        /// The path of the parameter in `params`, such as
+        /// `headers.Authorization`.
         param: String,
         /// The parser's message.
         message: String,
@@ -312,7 +313,8 @@ pub enum Problem {
     UnknownTemplateUpstream {
         /// The node.
         node: String,
-        /// The parameter path, dotted.
+        /// The path of the parameter in `params`, such as
+        /// `headers.Authorization`.
         param: String,
         /// The referenced node.
         upstream: String,
