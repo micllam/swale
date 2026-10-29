@@ -33,12 +33,12 @@ jobs:
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-hack
       # The library builds for a consumer that disables the `cli` feature,
-      # and each backend feature builds on its own.
-      - run: cargo check -p swale --no-default-features --locked
-      - run: cargo check -p swale --features aws --locked
-      - run: cargo check -p swale --features gcp --locked
-      - run: cargo check -p swale --features azure --locked
+      # and each feature builds on its own.
+      - run: cargo hack check -p swale --each-feature --locked
 
   test:
     runs-on: ubuntu-latest
