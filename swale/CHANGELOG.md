@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be 1 or more. `StatusReader::runs` takes the start partition as an `Option`
   and the limit, and `records::scan` takes a `KvRange`.
 - The `subprocess` and `shell` operators kill a program whose run time exceeds
-  `timeout`, and the attempt fails with a transient error. `SubprocessParams`
-  and `ShellParams` require `timeout`.
+  the optional `timeout` parameter, and the attempt fails with a transient
+  error. A struct literal of `SubprocessParams` or `ShellParams` must set
+  `timeout`.
 - A node with `each` runs its operator once per item of the array that `each`
   renders to, and outputs the array of the member outputs. A struct literal of
   `NodeSpec`, `TaskInput` or `RenderContext` must set the new fields, and a
