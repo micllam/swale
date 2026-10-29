@@ -71,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `timeout` in full, such as `within 3600.5s`. 0.2.0 truncated `timeout` to
   whole seconds in the message.
 
+<!-- vale off -->
+
 ## [0.2.0] - 2026-09-25
 
 ### Added
@@ -259,3 +261,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   object store URL and resumes an existing run.
 - The `aws`, `gcp` and `azure` features, which enable the object store
   backends of the same names in `taquba`.
+
+<!-- vale on -->

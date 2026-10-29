@@ -77,7 +77,11 @@ orders_daily: published ac04ecabf07dc9a6d74c698a89e90f5d36c0da5ae659b6bcf7c81f48
 $ swale daemon --store s3://bucket/swale --pool warehouse=2
 ```
 
+<!-- vale off -->
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
+
+<!-- vale on -->
