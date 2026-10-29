@@ -4,9 +4,9 @@
 //! The references:
 //!
 //! - `{{ partition }}`, the partition of the task instance.
-//! - `{{ run.<field> }}`, a field of the run: `id`, the run id of the task
-//!   instance, or `summary`, the summary of the graph run as JSON text.
-//! - `{{ upstream.<node>.<path> }}`, the output of an upstream node, or the
+//! - `{{ run.<field> }}`, a field of the run: `id` for the run id of the task
+//!   instance or `summary` for the summary of the graph run as JSON text.
+//! - `{{ upstream.<node>.<path> }}`, the output of an upstream node or the
 //!   value at a dotted path into it, such as `rows.0.id`.
 //! - `{{ env.<NAME> }}`, an environment variable of the process that renders
 //!   the template.
@@ -46,8 +46,7 @@ pub struct RunContext<'a> {
 /// A reference cannot be resolved against the [`RenderContext`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RenderError {
-    /// No succeeded record exists for the upstream node, so there is no
-    /// output.
+    /// No succeeded record exists for the upstream node, so there is no output.
     #[error("no output is recorded for upstream `{node}`")]
     MissingUpstream {
         /// The upstream node.
@@ -148,8 +147,8 @@ impl Template {
         Ok(Template { segments })
     }
 
-    /// The names of the upstream nodes the template refers to, in source
-    /// order and with repeats.
+    /// The names of the upstream nodes the template refers to, in source order
+    /// and with repeats.
     pub fn upstream_nodes(&self) -> impl Iterator<Item = &str> {
         self.segments.iter().filter_map(|segment| match segment {
             Segment::Upstream { node, .. } => Some(node.as_str()),

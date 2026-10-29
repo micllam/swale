@@ -1,6 +1,6 @@
 //! The command line: the argument parser and the dispatch to each command.
-//! [`store`] opens the store of `--store`, [`table`] prints a table, and
-//! each of the other modules implements one command.
+//! [`store`] opens the store of `--store`, [`table`] prints a table, and each
+//! of the other modules implements one command.
 
 mod daemon;
 mod publish;
@@ -42,8 +42,8 @@ enum Command {
         file: PathBuf,
     },
     /// Runs a graph for one partition on a store and waits for the run to
-    /// settle. A second run for the same partition resumes the existing
-    /// graph run.
+    /// settle. A second run for the same partition resumes the existing graph
+    /// run.
     Run {
         /// The definition file.
         file: PathBuf,
@@ -56,8 +56,8 @@ enum Command {
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
     },
-    /// Publishes a definition file as the current definition of its graph.
-    /// The daemon on the store adopts it at its next sync pass.
+    /// Publishes a definition file as the current definition of its graph. The
+    /// daemon on the store adopts it at its next sync pass.
     Publish {
         /// The definition file.
         file: PathBuf,
@@ -65,8 +65,7 @@ enum Command {
         store: StoreArg,
     },
     /// Runs the published graphs on a store until interrupted: adopts the
-    /// published definitions, fires each schedule and runs the task
-    /// instances.
+    /// published definitions, fires each schedule and runs the task instances.
     Daemon {
         #[command(flatten)]
         store: StoreArg,
@@ -79,13 +78,13 @@ enum Command {
         /// Seconds between sync passes over the published definitions.
         #[arg(long, default_value_t = 30)]
         sync_interval: u64,
-        /// The time the records of a settled graph run and the request
-        /// records are kept, such as `90d` or `12h`.
+        /// The time the records of a settled graph run and the request records
+        /// are kept, such as `90d` or `12h`.
         #[arg(long, default_value = "90d", value_parser = swale::duration::parse)]
         retention: Duration,
     },
-    /// Asks the daemon on a store to start the graph run of each partition.
-    /// A partition with a graph run is unchanged.
+    /// Asks the daemon on a store to start the graph run of each partition. A
+    /// partition with a graph run is unchanged.
     Start {
         /// The graph.
         graph: String,
@@ -95,9 +94,9 @@ enum Command {
         #[command(flatten)]
         request: RequestArgs,
     },
-    /// Asks the daemon on a store to run a node again. After a succeeded
-    /// node, the nodes downstream of it through an all-succeeded edge run
-    /// again with the new outputs.
+    /// Asks the daemon on a store to run a node again. After a succeeded node,
+    /// the nodes downstream of it through an all-succeeded edge run again with
+    /// the new outputs.
     Rerun {
         /// The graph.
         graph: String,
@@ -119,14 +118,14 @@ enum Command {
         #[command(flatten)]
         request: RequestArgs,
     },
-    /// Prints the graphs of a store, the graph runs of a graph, or the
-    /// nodes of one graph run. The command only reads from the store, so
-    /// it can run alongside a daemon.
+    /// Prints the graphs of a store, the graph runs of a graph or the nodes of
+    /// one graph run. The command only reads from the store, so it can run
+    /// alongside a daemon.
     Status {
         /// The graph. Without it, the command lists every graph.
         graph: Option<String>,
-        /// The partition key of one graph run. Without it, the command
-        /// lists the graph runs of the graph.
+        /// The partition key of one graph run. Without it, the command lists
+        /// the graph runs of the graph.
         #[arg(value_parser = parse_partition_arg)]
         partition: Option<Partition>,
         #[command(flatten)]
@@ -143,8 +142,8 @@ enum Command {
         )]
         limit: usize,
     },
-    /// Prints the job counts of every queue of a store, or the dead jobs
-    /// of one queue. The command only reads from the store.
+    /// Prints the job counts of every queue of a store, or the dead jobs of one
+    /// queue. The command only reads from the store.
     Queues {
         /// The queue. Without it, the command lists every queue.
         queue: Option<String>,

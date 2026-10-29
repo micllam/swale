@@ -45,7 +45,7 @@ impl RecordHook {
     }
 
     /// The record for `outcome`. The output is included when the record stays
-    /// within the KV value cap, and left out with `output_omitted` set
+    /// within the KV value cap, and omitted with `output_omitted` set
     /// otherwise.
     pub fn record(&self, identity: &TaskIdentity, outcome: &RunOutcome) -> NodeRecord {
         let output = match (outcome.status, &outcome.result) {

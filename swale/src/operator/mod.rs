@@ -4,8 +4,8 @@
 //! An [`OperatorSet`] maps an operator name to a parameter check and, for an
 //! operator the process runs, to an [`Operator`]. [`OperatorSet::builtin`]
 //! contains the operators of this crate, which the submodules [`subprocess`],
-//! [`shell`], [`http`] and [`object_exists`] implement, and a consumer adds
-//! its own with [`OperatorSet::add`] or, for a check alone,
+//! [`shell`], [`http`] and [`object_exists`] implement, and a consumer adds its
+//! own with [`OperatorSet::add`] or, for a check alone,
 //! [`OperatorSet::register`].
 //!
 //! An operator that waits on an external condition ends each poll with
@@ -50,8 +50,8 @@ pub struct Task<'a> {
     /// The state of the previous step of the run, from its
     /// [`Outcome::Continue`]. `None` on the first step.
     pub state: Option<&'a Value>,
-    /// The time the step started, in milliseconds from the Unix epoch, by
-    /// the clock of the store.
+    /// The time the step started, in milliseconds from the Unix epoch, by the
+    /// clock of the store.
     pub now_ms: u64,
 }
 
@@ -75,8 +75,8 @@ pub enum Outcome {
 
 /// An operator the process runs.
 pub trait Operator: Send + Sync + 'static {
-    /// The parameter type. A node's `params` table must deserialize into it
-    /// at load time, and the rendered parameters do so at run time.
+    /// The parameter type. A node's `params` table must deserialize into it at
+    /// load time, and the rendered parameters do so at run time.
     type Params: DeserializeOwned + Send;
 
     /// Runs one task instance. The implementation must be idempotent per
@@ -108,8 +108,8 @@ pub struct OperatorSet {
 pub enum OperatorError {
     /// The operator is not registered.
     Unknown,
-    /// The parameters do not deserialize into the operator's type. The
-    /// string is the deserializer's message.
+    /// The parameters do not deserialize into the operator's type. The string
+    /// is the deserializer's message.
     InvalidParams(String),
 }
 
@@ -130,8 +130,8 @@ impl OperatorSet {
         set
     }
 
-    /// Registers `name` with `P` as its parameter type and without an
-    /// operator to run. A second registration of `name` replaces the first.
+    /// Registers `name` with `P` as its parameter type and without an operator
+    /// to run. A second registration of `name` replaces the first.
     pub fn register<P: DeserializeOwned + 'static>(&mut self, name: &str) {
         self.entries.insert(
             name.to_string(),
@@ -204,8 +204,8 @@ impl OperatorSet {
     }
 }
 
-/// The lease extension of an operator that waits on an external process
-/// or call.
+/// The lease extension of an operator that waits on an external process or
+/// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lease {
     /// The time the lease is extended to at each extension.
@@ -224,8 +224,8 @@ impl Default for Lease {
     }
 }
 
-/// Extends the lease of `step` by `lease` while the operator waits, and
-/// returns the error of an extension that failed.
+/// Extends the lease of `step` by `lease` while the operator waits, and returns
+/// the error of an extension that failed.
 pub(crate) async fn keep_lease(step: &Step, lease: Lease) -> StepError {
     let mut ticks = tokio::time::interval(lease.interval);
     ticks.tick().await;

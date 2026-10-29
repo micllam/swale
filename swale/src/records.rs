@@ -137,8 +137,8 @@ pub fn node_record_key(graph: &str, partition: &Partition, node: &Node) -> Vec<u
     record_key(graph, partition, node.name(), node.asset())
 }
 
-/// The key of the record of the node `node` for `partition`: the asset key
-/// when the node produces `asset`, the task key otherwise.
+/// The key of the record of the node `node` for `partition`: the asset key when
+/// the node produces `asset`, the task key otherwise.
 pub fn record_key(graph: &str, partition: &Partition, node: &str, asset: Option<&str>) -> Vec<u8> {
     match asset {
         Some(asset) => asset_key(asset, partition),
@@ -160,7 +160,7 @@ pub enum RecordStatus {
 }
 
 impl RecordStatus {
-    /// The lowercase name, as in the JSON form.
+    /// The lower-case name, as in the JSON form.
     pub fn as_str(&self) -> &'static str {
         match self {
             RecordStatus::Succeeded => "succeeded",
@@ -200,11 +200,11 @@ pub struct NodeRecord {
     pub rerun: u32,
     /// The time of the termination, in milliseconds from the Unix epoch.
     pub terminated_at_ms: u64,
-    /// The output of a succeeded run, when the record stays within the KV
-    /// value cap.
+    /// The output of a succeeded run, when the record stays within the KV value
+    /// cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<serde_json::Value>,
-    /// Whether the output was left out because the record exceeded the cap.
+    /// Whether the output was omitted because the record exceeded the cap.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub output_omitted: bool,
     /// The error of a failed or cancelled run.
@@ -227,7 +227,7 @@ pub enum GraphRunState {
 }
 
 impl GraphRunState {
-    /// The lowercase name, as in the JSON form.
+    /// The lower-case name, as in the JSON form.
     pub fn as_str(&self) -> &'static str {
         match self {
             GraphRunState::Active => "active",
@@ -261,23 +261,23 @@ pub struct GraphRunRecord {
     pub settled_at_ms: Option<u64>,
     /// The rerun count each listed node must reach for its record to be
     /// current, by node name. A rerun of a succeeded node lists the node and
-    /// the nodes downstream of it through an all-succeeded edge, and the
-    /// settle of the run removes an entry that a record reached.
+    /// the nodes downstream of it through an all-succeeded edge, and the settle
+    /// of the run removes an entry that a record reached.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub expected_reruns: BTreeMap<String, u32>,
 }
 
 impl GraphRunRecord {
-    /// Whether `record`, the record of `node`, is at or past the rerun
-    /// count the run expects of the node. A record below the count is
-    /// superseded by a rerun, and the readiness rule treats it as absent.
+    /// Whether `record`, the record of `node`, is at or past the rerun count
+    /// the run expects of the node. A record below the count is superseded by a
+    /// rerun, and the readiness rule treats it as absent.
     pub fn is_current(&self, node: &str, record: &NodeRecord) -> bool {
         record.rerun >= self.expected_reruns.get(node).copied().unwrap_or(0)
     }
 }
 
-/// The record of a graph the process adopted: the definition that a trigger
-/// of the graph starts. The daemon is the only writer of the record.
+/// The record of a graph the process adopted: the definition that a trigger of
+/// the graph starts. The daemon is the only writer of the record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphRecord {
     /// The hash of the adopted definition.
@@ -290,8 +290,8 @@ pub struct GraphRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RequestOutcome {
-    /// The graph runs of the listed partitions were started. A partition of
-    /// the request that is absent from the list had a graph run before.
+    /// The graph runs of the listed partitions were started. A partition of the
+    /// request that is absent from the list had a graph run before.
     Started {
         /// The partitions whose graph run the request started.
         partitions: Vec<Partition>,
@@ -316,8 +316,7 @@ pub enum RequestOutcome {
 pub struct RequestRecord {
     /// The request.
     pub request: Request,
-    /// The time the request was applied, in milliseconds from the Unix
-    /// epoch.
+    /// The time the request was applied, in milliseconds from the Unix epoch.
     pub handled_at_ms: u64,
     /// The outcome.
     pub outcome: RequestOutcome,
@@ -396,8 +395,8 @@ pub struct Entry<T> {
 }
 
 /// Every record with `prefix` whose key is within `range`, in key order. A
-/// value that is not a `T` is logged and skipped, so one malformed record
-/// does not end a listing.
+/// value that is not a `T` is logged and skipped, so one malformed record does
+/// not end a listing.
 pub async fn scan<T: JsonBytes>(
     view: &QueueView,
     prefix: &[u8],

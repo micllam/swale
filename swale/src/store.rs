@@ -1,6 +1,6 @@
-//! The layout of the object store: every path the process writes is within
-//! the store prefix of the `--store` URL. [`store_path`] joins the prefix the
-//! one way, and an [`ObjectPrefix`] is the objects within one such path.
+//! The layout of the object store: every path the process writes is within the
+//! store prefix of the `--store` URL. [`store_path`] joins the prefix the one
+//! way, and an [`ObjectPrefix`] is the objects within one such path.
 
 use std::sync::Arc;
 

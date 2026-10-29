@@ -23,10 +23,10 @@ mod common;
 
 const PARTITION: &str = "20260915";
 
-/// A graph of subprocess nodes. `transform` prints the rows it receives
-/// through a template, `load` runs in the `warehouse` pool, and `notify` runs
-/// after `transform` regardless of its outcome. `transform_script` is the
-/// shell script of `transform`.
+/// A graph of subprocess nodes. `transform` prints the rows it receives through
+/// a template, `load` runs in the `warehouse` pool, and `notify` runs after
+/// `transform` regardless of its outcome. `transform_script` is the shell
+/// script of `transform`.
 fn definition_text(transform_script: &str) -> String {
     format!(
         r#"
@@ -330,9 +330,8 @@ async fn a_rerun_of_a_succeeded_node_runs_its_downstreams_again() {
         .unwrap();
     h.wait_for_state(GraphRunState::Complete).await;
 
-    // The rerun of `extract` expects the next count of `extract`,
-    // `transform` and `load`. `notify` has the `all_done` rule and keeps
-    // its record.
+    // The rerun of `extract` expects the next count of `extract`, `transform`
+    // and `load`. `notify` has the `all_done` rule and keeps its record.
     let rerun = h
         .scheduler
         .rerun("orders", &Harness::partition(), "extract")
@@ -364,8 +363,8 @@ async fn a_rerun_of_a_succeeded_node_runs_its_downstreams_again() {
         assert_eq!(record.status, RecordStatus::Succeeded);
     }
 
-    // A second rerun of the same node expects the count after the new
-    // records, and the run is active with the scope listed.
+    // A second rerun of the same node expects the count after the new records,
+    // and the run is active with the scope listed.
     let rerun = h
         .scheduler
         .rerun("orders", &Harness::partition(), "transform")
@@ -410,8 +409,8 @@ async fn a_cancelled_graph_run_submits_no_further_node() {
     assert_eq!(run.state, GraphRunState::Cancelled);
     assert_eq!(run.settled_at_ms, Some(1_700_000_000_000));
 
-    // Regardless of how `extract` ended, the scheduler ignores its event,
-    // and `load` is never submitted.
+    // Regardless of how `extract` ended, the scheduler ignores its event, and
+    // `load` is never submitted.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         h.record("swale/assets/orders_warehouse/20260915")
@@ -492,8 +491,8 @@ async fn the_reconciler_submits_ready_nodes_and_settles_the_run_without_events()
         Some("the graph run is cancelled")
     );
 
-    // The run is active again. Every node is recorded or waiting, so the
-    // pass writes the final state.
+    // The run is active again. Every node is recorded or waiting, so the pass
+    // writes the final state.
     h.queue.kv_put(&key, &run.to_bytes()).await.unwrap();
     h.write_record(
         "swale/assets/orders_clean/20260915",
@@ -549,8 +548,8 @@ async fn a_rerun_states_the_run_id_submitted_or_why_the_node_was_not_rerun() {
         rerun("extract").await,
         submitted("orders-20260915-extract-r1")
     );
-    // The record of `extract` is superseded until its rerun is recorded,
-    // so `transform` is not ready, and the rerun of `extract` is pending.
+    // The record of `extract` is superseded until its rerun is recorded, so
+    // `transform` is not ready, and the rerun of `extract` is pending.
     assert_eq!(rerun("transform").await, RerunOutcome::NotReady);
     assert_eq!(
         rerun("extract").await,
@@ -594,8 +593,8 @@ command = "printf '{{\"size\": {{{{ upstream.arrival.size }}}}}}'"
         .await
         .unwrap();
 
-    // The first poll ends without the object, and the run waits for its
-    // second step.
+    // The first poll ends without the object, and the run waits for its second
+    // step.
     let runtime = h.pools.runtime("default").unwrap();
     let run_id: RunId = "orders-20260915-arrival-r0".parse().unwrap();
     common::wait_until("the first poll never ended", async || {
@@ -607,8 +606,8 @@ command = "printf '{{\"size\": {{{{ upstream.arrival.size }}}}}}'"
     })
     .await;
     std::fs::write(dir.join("orders-20260915.parquet"), b"12345").unwrap();
-    // The second poll is due one interval after the first, by the clock of
-    // the store.
+    // The second poll is due one interval after the first, by the clock of the
+    // store.
     h.clock.advance(Duration::from_secs(61));
     h.wait_for_state(GraphRunState::Complete).await;
     let arrival = h

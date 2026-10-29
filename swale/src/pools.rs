@@ -1,8 +1,8 @@
 //! The pools: one [`WorkflowRuntime`] per pool, all over one queue and one
 //! store.
 //!
-//! Every task instance runs on the runtime of its node's pool. The queue of
-//! the pool `name` is `swale-pool-{name}`, and its memos are at `memos/{name}`
+//! Every task instance runs on the runtime of its node's pool. The queue of the
+//! pool `name` is `swale-pool-{name}`, and its memos are at `memos/{name}`
 //! within the store prefix. The terminal hook of each runtime is the
 //! [`RecordHook`], which writes the node's record and enqueues the event for
 //! the scheduler. The members of a mapped node run on the runtime of the node's
@@ -50,8 +50,8 @@ pub struct PoolsBuilder {
 
 impl PoolsBuilder {
     /// Adds the pool `name` with `max_concurrent_steps` steps at a time. Its
-    /// queue is `swale-pool-{name}`, and its memos are at `memos/{name}`
-    /// within the store prefix.
+    /// queue is `swale-pool-{name}`, and its memos are at `memos/{name}` within
+    /// the store prefix.
     pub fn pool(mut self, name: impl Into<String>, max_concurrent_steps: usize) -> Self {
         self.pools.push((name.into(), max_concurrent_steps));
         self
@@ -65,10 +65,9 @@ impl PoolsBuilder {
 
     /// The time the memos and the run result record of a terminated task
     /// instance are kept, seven days by default. The scheduler does not read
-    /// them, so the retention determines how long an operator can inspect
-    /// them. The rerun of a mapped node reads the run result record of every
-    /// member, and runs every member again when the record of a member is
-    /// removed.
+    /// them, so the retention determines how long an operator can inspect them.
+    /// The rerun of a mapped node reads the run result record of every member,
+    /// and runs every member again when the record of a member is removed.
     pub fn memo_retention(mut self, retention: Duration) -> Self {
         self.memo_retention = retention;
         self
@@ -90,8 +89,8 @@ impl PoolsBuilder {
         self
     }
 
-    /// The path within the store that every pool writes its memos under,
-    /// for a store whose queue is opened at a prefix. Empty by default.
+    /// The path within the store that every pool writes its memos under, for a
+    /// store whose queue is opened at a prefix. Empty by default.
     pub fn store_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.store_prefix = prefix.into();
         self
@@ -125,8 +124,8 @@ impl PoolsBuilder {
 }
 
 impl Pools {
-    /// Starts building pools over `queue` and `store`, with `operators` as
-    /// the dispatch and `hook` as the terminal hook of every pool.
+    /// Starts building pools over `queue` and `store`, with `operators` as the
+    /// dispatch and `hook` as the terminal hook of every pool.
     pub fn builder(
         queue: Arc<Queue>,
         store: Arc<dyn ObjectStore>,

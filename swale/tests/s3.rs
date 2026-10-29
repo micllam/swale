@@ -1,7 +1,7 @@
 //! The commands on an object store URL, as CI runs them against an S3 API.
 //!
-//! Every test is ignored by default. `SWALE_TEST_STORE_URL` is a store URL
-//! that the tests write to, such as `s3://swale/ci-1`, and the provider's
+//! Every test is ignored by default. `SWALE_TEST_STORE_URL` is a store URL that
+//! the tests write to, such as `s3://swale/ci-1`, and the provider's
 //! environment variables configure the store as they do for the command:
 //!
 //!     cargo test -p swale --features aws --test s3 -- --ignored
@@ -23,8 +23,8 @@ use taquba::{KvOrder, QueueReader, ReaderOptions};
 
 const LOCAL_EXAMPLE: &str = "examples/local.toml";
 
-/// A graph whose catch-up window of two hours contains the firings of at
-/// least two hourly partitions at every time of the day.
+/// A graph whose catch-up window of two hours contains the firings of at least
+/// two hourly partitions at every time of the day.
 const CATCH_UP_GRAPH: &str = r#"
 [graph]
 name = "catch_up"
@@ -51,8 +51,8 @@ fn open(url: &str) -> (Arc<dyn ObjectStore>, ObjectPath) {
     taquba::open_url(url, std::env::vars()).unwrap()
 }
 
-/// The names of the entries directly within `path`. An object directly
-/// within `path` fails the test.
+/// The names of the entries directly within `path`. An object directly within
+/// `path` fails the test.
 async fn children(store: &Arc<dyn ObjectStore>, path: Option<&ObjectPath>) -> Vec<String> {
     let listing = store.list_with_delimiter(path).await.unwrap();
     assert!(listing.objects.is_empty(), "{:?}", listing.objects);
@@ -106,9 +106,9 @@ async fn run_command_completes_and_resumes_on_the_url_and_every_object_is_within
         children(&store, Some(&prefix)).await,
         ["definitions", "memos", "swale"]
     );
-    // Every object that the tests of this file write is within the base
-    // URL. The root of a `file` URL is the root of the file system, which
-    // the test does not list.
+    // Every object that the tests of this file write is within the base URL.
+    // The root of a `file` URL is the root of the file system, which the test
+    // does not list.
     let (_, base_path) = open(&base);
     for name in children(&store, Some(&base_path)).await {
         assert!(["run", "daemon"].contains(&name.as_str()), "{name}");
@@ -177,9 +177,8 @@ async fn daemon_adopts_a_published_graph_and_catches_up_on_the_url() {
         reader.close().await.unwrap();
     }
 
-    // A request from another process is applied by the daemon, and the
-    // command reads its outcome. The partition is outside every catch-up
-    // window.
+    // A request from another process is applied by the daemon, and the command
+    // reads its outcome. The partition is outside every catch-up window.
     let output = swale(&["start", "catch_up", "20200101T00", "--wait"], &url)
         .output()
         .unwrap();

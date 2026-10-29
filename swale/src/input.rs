@@ -1,8 +1,8 @@
 //! The input of a task instance: the operator, the node's parameters before
 //! rendering and the records of its upstreams. The input is the run's payload,
 //! so a definition edit that changes a node's parameters while its run is
-//! active fails the resubmission with an input mismatch. The payload of a
-//! later step of the run is the input with the state of the previous step.
+//! active fails the resubmission with an input mismatch. The payload of a later
+//! step of the run is the input with the state of the previous step.
 //!
 //! The input of a mapped node includes the template of its items, and the input
 //! of a member adds its item to the input of the node.

@@ -1,27 +1,27 @@
-//! The daemon: the long-running process of a deployment. It runs the pools
-//! and the [`Scheduler`], adopts the published definitions and schedules the
-//! cron entry of every adopted graph with a schedule.
+//! The daemon: the long-running process of a deployment. It runs the pools and
+//! the [`Scheduler`], adopts the published definitions and schedules the cron
+//! entry of every adopted graph with a schedule.
 //!
 //! # Adoption
 //!
 //! A sync pass ([`Daemon::sync`]) reads the pointer objects of the
 //! [`DefinitionStore`](crate::DefinitionStore) and writes the [`GraphRecord`]
-//! of every graph whose pointer changed. A trigger starts the definition of
-//! the graph record, so an edit applies from the next graph run. The pass
-//! refuses a definition that does not load, that uses a pool without a
-//! runtime or that produces an asset of another adopted graph, and the graph
-//! keeps its adopted definition.
+//! of every graph whose pointer changed. A trigger starts the definition of the
+//! graph record, so an edit applies from the next graph run. The pass refuses a
+//! definition that does not load, that uses a pool without a runtime or that
+//! produces an asset of another adopted graph, and the graph keeps its adopted
+//! definition.
 //!
 //! # Catch-up and backfill
 //!
 //! The cron entry of a graph with a `catchup` window has a backfill of that
-//! window, which starts at the lookback ([`BackfillStart::Lookback`]). The
-//! cron scheduler replays the firings within the window for a new graph, and
-//! the firings missed during downtime for a graph that fired before.
+//! window, which starts at the lookback ([`BackfillStart::Lookback`]). The cron
+//! scheduler replays the firings within the window for a new graph, and the
+//! firings missed during downtime for a graph that fired before.
 //!
-//! The daemon keeps one cron scheduler for its lifetime. Every sync pass
-//! gives the [`Schedule`] of each adopted graph to
-//! [`ScheduleHandle::replace_all`], which leaves an equal schedule untouched.
+//! The daemon keeps one cron scheduler for its lifetime. Every sync pass gives
+//! the [`Schedule`] of each adopted graph to [`ScheduleHandle::replace_all`],
+//! which leaves an equal schedule untouched.
 //!
 //! # Retention
 //!
@@ -73,8 +73,8 @@ pub struct SyncReport {
     pub adopted: Vec<(String, String)>,
     /// The graphs whose published definition was refused, with the reason.
     pub refused: Vec<(String, String)>,
-    /// The cron schedules of the adopted graphs, in graph name order. The
-    /// name of a schedule is the graph name.
+    /// The cron schedules of the adopted graphs, in graph name order. The name
+    /// of a schedule is the graph name.
     pub schedules: Vec<Schedule>,
 }
 
@@ -195,10 +195,10 @@ impl Daemon {
         scheduler_handle.wait().await
     }
 
-    /// Replaces the schedules of the cron scheduler with `schedules`. An
-    /// equal schedule keeps its next firing. The call applies the whole set
-    /// or no part of it, so a schedule that the scheduler rejects for its
-    /// catch-up window is removed from the set and reported.
+    /// Replaces the schedules of the cron scheduler with `schedules`. An equal
+    /// schedule keeps its next firing. The call applies the whole set or no
+    /// part of it, so a schedule that the scheduler rejects for its catch-up
+    /// window is removed from the set and reported.
     fn register(&self, handle: &ScheduleHandle, mut schedules: Vec<Schedule>) {
         loop {
             match handle.replace_all(schedules.clone()) {

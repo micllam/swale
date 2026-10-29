@@ -30,8 +30,8 @@ pub enum Partitioning {
 }
 
 impl fmt::Display for Partitioning {
-    /// The value of the `partition` field of a definition: `daily`, `hourly`
-    /// or `none`.
+    /// The value of the `partition` field of a definition: `daily`, `hourly` or
+    /// `none`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Partitioning::Daily => "daily",
@@ -86,8 +86,7 @@ pub struct NodeSpec {
     pub pool: String,
     /// The retries after the first attempt.
     pub retries: u32,
-    /// The operator parameters. A string value can contain template
-    /// references.
+    /// The operator parameters. A string value can contain template references.
     pub params: toml::Table,
     /// The template of the items of a mapped node, which renders to a JSON
     /// array. `None` for a node that runs once.
@@ -248,8 +247,8 @@ pub enum Problem {
     /// A node name is outside `[a-z0-9_]+`.
     #[error("node `{0}`: the name is not `[a-z0-9_]+`")]
     InvalidNodeName(String),
-    /// The graph name and the node name exceed
-    /// [`MAX_GRAPH_AND_NODE_NAME_LEN`] together.
+    /// The graph name and the node name exceed [`MAX_GRAPH_AND_NODE_NAME_LEN`]
+    /// together.
     #[error(
         "node `{0}`: the graph and node names exceed {MAX_GRAPH_AND_NODE_NAME_LEN} bytes together"
     )]
@@ -366,8 +365,8 @@ pub enum Problem {
 }
 
 impl Graph {
-    /// Builds and checks a graph. Every fault found is returned, and a graph
-    /// is returned only when no fault is found.
+    /// Builds and checks a graph. Every fault found is returned, and a graph is
+    /// returned only when no fault is found.
     pub fn build(spec: GraphSpec, operators: &OperatorSet) -> Result<Graph, Vec<Problem>> {
         let mut problems = Vec::new();
 
@@ -699,8 +698,8 @@ fn check_each(node: &str, each: &str, upstreams: &BTreeSet<String>, problems: &m
     }
 }
 
-/// The path of a cycle as node names, each an upstream of the one before it
-/// and the first repeated at the end, or `None` when the edges are acyclic.
+/// The path of a cycle as node names, each an upstream of the one before it and
+/// the first repeated at the end, or `None` when the edges are acyclic.
 fn find_cycle(
     nodes: &[NodeSpec],
     upstreams: &[BTreeSet<String>],

@@ -1,5 +1,5 @@
-//! The view of a deployment from another process: the graphs, the graph
-//! runs, the state of every node of a graph run and the queues.
+//! The view of a deployment from another process: the graphs, the graph runs,
+//! the state of every node of a graph run and the queues.
 //!
 //! A [`StatusReader`] reads the records of [`crate::records`] through a
 //! [`QueueReader`] and the definitions through a [`DefinitionStore`]. It only
@@ -255,8 +255,8 @@ impl StatusReader {
         Ok(StatusReader::new(reader, store, store_prefix, definitions))
     }
 
-    /// A view through `reader`, for a caller that sets the reader options.
-    /// The pools of the store write their memos within `store_prefix`.
+    /// A view through `reader`, for a caller that sets the reader options. The
+    /// pools of the store write their memos within `store_prefix`.
     pub fn new(
         reader: QueueReader,
         store: Arc<dyn ObjectStore>,
@@ -337,9 +337,9 @@ impl StatusReader {
         Ok(runs)
     }
 
-    /// The graph run of `graph` for `partition` with the state of every node
-    /// of the definition it records and the task instance of every node that
-    /// the runtime of its pool has, or `None` without a graph run record.
+    /// The graph run of `graph` for `partition` with the state of every node of
+    /// the definition it records and the task instance of every node that the
+    /// runtime of its pool has, or `None` without a graph run record.
     pub async fn run(
         &self,
         graph: &str,
@@ -435,8 +435,8 @@ impl StatusReader {
         Ok(stats)
     }
 
-    /// The first `limit` dead jobs of `queue`, in enqueue order, or `None`
-    /// when the store does not have the queue.
+    /// The first `limit` dead jobs of `queue` in enqueue order, or `None` when
+    /// the store does not have the queue.
     pub async fn dead_jobs(
         &self,
         queue: &str,

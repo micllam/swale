@@ -1,5 +1,5 @@
-//! The store of a command: the `--store` argument, the open object store
-//! and the queue, the pools and the scheduler of a process over it.
+//! The store of a command: the `--store` argument, the open object store and
+//! the queue, the pools and the scheduler of a process over it.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -23,17 +23,17 @@ const QUEUE_PATH: &str = "swale";
 
 #[derive(clap::Args)]
 pub(crate) struct StoreArg {
-    /// The store: a directory, created when absent, or an object store
-    /// URL (`s3://bucket/prefix`, `gs://bucket/prefix`,
-    /// `az://container/prefix`, `file:///path`). A cloud scheme needs
+    /// The store: an object store URL (`s3://bucket/prefix`,
+    /// `gs://bucket/prefix`, `az://container/prefix`, `file:///path`) or a
+    /// directory, which the command creates when absent. A cloud scheme needs
     /// the matching cargo feature and reads the provider's environment
     /// variables for its credentials. The default is `~/.swale/store`.
     #[arg(long, value_parser = parse_store_arg)]
     pub(crate) store: Option<String>,
 }
 
-/// Checks the scheme of a `--store` URL at argument parsing. A bare path
-/// passes through.
+/// Checks the scheme of a `--store` URL at argument parsing. A bare path passes
+/// through.
 fn parse_store_arg(raw: &str) -> Result<String, String> {
     let is_url = raw.contains("://") && raw.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
     if !is_url {
@@ -69,8 +69,8 @@ fn default_store(home: Option<PathBuf>) -> Option<PathBuf> {
     Some(home.join(".swale").join("store"))
 }
 
-/// An open store: the object store, the store prefix and the path of the
-/// queue within the store.
+/// An open store: the object store, the store prefix and the path of the queue
+/// within the store.
 pub(crate) struct Store {
     pub(crate) objects: Arc<dyn ObjectStore>,
     pub(crate) prefix: String,
@@ -104,8 +104,8 @@ fn store_location(arg: StoreArg) -> Result<String, Box<dyn std::error::Error>> {
     }
 }
 
-/// Opens the store of a command that writes to it, and creates the
-/// directory of a directory store first.
+/// Opens the store of a command that writes to it, and creates the directory of
+/// a directory store first.
 pub(crate) fn create_store(arg: StoreArg) -> Result<Store, Box<dyn std::error::Error>> {
     let location = store_location(arg)?;
     if !location.contains("://") {

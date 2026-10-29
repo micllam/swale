@@ -1,9 +1,9 @@
-//! The step runner of every pool: it reads the task input from the payload
-//! and the identity from the headers, renders the parameters and runs the
-//! operator. An `{{ env.<NAME> }}` reference renders from the environment
-//! of the process, read once when the runner is built. An
-//! [`Outcome::Continue`] enqueues the next step of the run after its delay,
-//! with the input and the state as the payload.
+//! The step runner of every pool: it reads the task input from the payload and
+//! the identity from the headers, renders the parameters and runs the operator.
+//! An `{{ env.<NAME> }}` reference renders from the environment of the process,
+//! read once when the runner is built. An [`Outcome::Continue`] enqueues the
+//! next step of the run after its delay, with the input and the state as the
+//! payload.
 //!
 //! # Mapped nodes
 //!
@@ -103,9 +103,9 @@ enum Phase {
 }
 
 impl Dispatch {
-    /// A runner over `operators` with `clock` as the clock of
-    /// [`Task::now_ms`] and the environment of the process as the variables
-    /// of `{{ env.<NAME> }}`. A variable whose name or value is not UTF-8 is
+    /// A runner over `operators` with `clock` as the clock of [`Task::now_ms`]
+    /// and the environment of the process as the variables of
+    /// `{{ env.<NAME> }}`. A variable whose name or value is not UTF-8 is
     /// omitted.
     pub fn new(operators: Arc<OperatorSet>, clock: Arc<dyn Clock>) -> Self {
         let env = std::env::vars_os()
@@ -114,8 +114,8 @@ impl Dispatch {
         Dispatch::with_env(operators, clock, env)
     }
 
-    /// A runner over `operators` with `clock` as the clock of
-    /// [`Task::now_ms`] and `env` as the variables of `{{ env.<NAME> }}`.
+    /// A runner over `operators` with `clock` as the clock of [`Task::now_ms`]
+    /// and `env` as the variables of `{{ env.<NAME> }}`.
     pub fn with_env(
         operators: Arc<OperatorSet>,
         clock: Arc<dyn Clock>,

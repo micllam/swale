@@ -1,12 +1,11 @@
-//! The `http` operator: sends one request and reads the response as the
-//! output.
+//! The `http` operator: sends one request and reads the response as the output.
 //!
-//! The output is `{"status": <code>, "body": <value>}`. The body is parsed
-//! as JSON when it is JSON and kept as text otherwise, and an empty body is
+//! The output is `{"status": <code>, "body": <value>}`. The body is parsed as
+//! JSON when it is JSON and kept as text otherwise, and an empty body is
 //! `null`. A 2xx status is success. A 5xx status, a 429 status, a connection
 //! failure and a timeout are transient errors, and any other status is a
-//! permanent error. The tail of the response body is in the error message.
-//! The request must be idempotent per attempt.
+//! permanent error. The tail of the response body is in the error message. The
+//! request must be idempotent per attempt.
 
 use std::collections::BTreeMap;
 use std::time::Duration;

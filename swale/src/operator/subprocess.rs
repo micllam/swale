@@ -1,5 +1,5 @@
-//! The `subprocess` operator: runs a program with a JSON document on stdin
-//! and reads its output JSON from stdout.
+//! The `subprocess` operator: runs a program with a JSON document on stdin and
+//! reads its output JSON from stdout.
 //!
 //! The stdin document is `{run_id, graph, partition, node, attempt, params,
 //! inputs}`, where `inputs` maps each upstream node name to its output. Exit
@@ -132,8 +132,8 @@ pub(crate) async fn run_program(
     });
     if let Some(document) = stdin {
         let mut pipe = child.stdin.take().expect("stdin is piped");
-        // A program that ignores stdin closes the pipe. The write error is
-        // then expected and is dropped.
+        // A program that ignores stdin closes the pipe. The write error is then
+        // expected and is dropped.
         let _ = pipe.write_all(&document).await;
     }
 

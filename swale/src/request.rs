@@ -38,9 +38,9 @@ pub const REQUESTS_QUEUE: &str = "swale-requests";
 /// Maximum length of a request id in bytes.
 pub const MAX_REQUEST_ID_LEN: usize = 64;
 
-/// The id of a request: `[A-Za-z0-9_-]` of one to [`MAX_REQUEST_ID_LEN`]
-/// bytes. A generated id is a ULID, so the ids of a listing sort by the time
-/// of the request.
+/// The id of a request: `[A-Za-z0-9_-]` of one to [`MAX_REQUEST_ID_LEN`] bytes.
+/// A generated id is a ULID, so the ids of a listing sort by the time of the
+/// request.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(String);
 
@@ -65,8 +65,7 @@ impl RequestId {
         }
     }
 
-    /// A new id for a request at `now_ms`, in milliseconds from the Unix
-    /// epoch.
+    /// A new id for a request at `now_ms`, in milliseconds from the Unix epoch.
     pub fn generate(now_ms: u64) -> Self {
         let time = SystemTime::UNIX_EPOCH + Duration::from_millis(now_ms);
         RequestId(ulid::Ulid::from_datetime(time).to_string())

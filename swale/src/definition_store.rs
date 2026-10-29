@@ -1,13 +1,12 @@
-//! The definitions of a deployment, stored in the object store by content
-//! hash.
+//! The definitions of a deployment, stored in the object store by content hash.
 //!
 //! - `{store prefix}/definitions/{hash}.toml`: the text of a definition.
 //! - `{store prefix}/definitions/current/{graph}`: the pointer object of a
 //!   graph. Its content is the hash of the graph's current definition.
 //!
 //! [`DefinitionStore::publish`] writes both objects and does not open the
-//! queue. The daemon reads the pointer objects and adopts each definition
-//! (see [`crate::daemon`]).
+//! queue. The daemon reads the pointer objects and adopts each definition (see
+//! [`crate::daemon`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
@@ -79,15 +78,15 @@ impl DefinitionStore {
         }
     }
 
-    /// Checks `text` and writes its definition object. The pointer of the
-    /// graph is unchanged.
+    /// Checks `text` and writes its definition object. The pointer of the graph
+    /// is unchanged.
     pub async fn put(&self, text: &str) -> Result<(String, Arc<Graph>), DefinitionError> {
         let graph = definition::load_str(text, &self.operators)?;
         self.write(text, graph).await
     }
 
-    /// Writes the definition object of `text`, whose checked graph is
-    /// `graph`, and caches the graph. Returns the hash and the cached graph.
+    /// Writes the definition object of `text`, whose checked graph is `graph`,
+    /// and caches the graph. Returns the hash and the cached graph.
     async fn write(
         &self,
         text: &str,
@@ -100,9 +99,9 @@ impl DefinitionStore {
         Ok((hash.clone(), self.cache(hash, graph)))
     }
 
-    /// Publishes `text` as the current definition of its graph: checks that
-    /// the current definition of another graph does not produce one of its
-    /// assets, then writes the definition object and the pointer object.
+    /// Publishes `text` as the current definition of its graph: checks that the
+    /// current definition of another graph does not produce one of its assets,
+    /// then writes the definition object and the pointer object.
     pub async fn publish(&self, text: &str) -> Result<Published, DefinitionError> {
         let graph = definition::load_str(text, &self.operators)?;
         let current = self.current().await?;

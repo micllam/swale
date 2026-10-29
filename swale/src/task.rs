@@ -1,6 +1,6 @@
-//! The identity of a task instance: the graph, the partition, the node and
-//! the rerun count, which together form the run id and the `swale.` headers
-//! of the run.
+//! The identity of a task instance: the graph, the partition, the node and the
+//! rerun count, which together form the run id and the `swale.` headers of the
+//! run.
 //!
 //! The task instance of a mapped node submits one run per item, the members of
 //! the node, as a run group of the runtime with the id of [`group_id`]. A
@@ -80,8 +80,8 @@ pub fn group_id(graph: &str, partition: &Partition, node: &str) -> RunId {
 /// The run id of the task instance of `node` that does not have a current
 /// record in the graph run `run`, whose node records are `records` by node
 /// name. It is the run at count 0 of a node without a record, and the run at
-/// the next count after a failed, cancelled or superseded record. `None`
-/// after a current succeeded record.
+/// the next count after a failed, cancelled or superseded record. `None` after
+/// a current succeeded record.
 pub fn unrecorded_run_id(
     graph: &Graph,
     partition: &Partition,
@@ -107,8 +107,7 @@ impl TaskIdentity {
         run_id(&self.graph, &self.partition, &self.node, self.rerun)
     }
 
-    /// The id of the run group of the members of the node (see
-    /// [`group_id`]).
+    /// The id of the run group of the members of the node (see [`group_id`]).
     pub fn group_id(&self) -> RunId {
         group_id(&self.graph, &self.partition, &self.node)
     }

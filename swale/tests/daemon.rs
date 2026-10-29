@@ -1,6 +1,6 @@
-//! The daemon on an in-memory store with the mock clock: adoption, the
-//! catch-up of a new graph, a cron firing, the backfill after downtime and
-//! the requests of another process.
+//! The daemon on an in-memory store with the mock clock: adoption, the catch-up
+//! of a new graph, a cron firing, the backfill after downtime and the requests
+//! of another process.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,8 +28,8 @@ use tokio_util::sync::CancellationToken;
 
 mod common;
 
-/// A scheduled graph of one subprocess node in `pool`, which produces
-/// `asset`, with a catch-up window of three days.
+/// A scheduled graph of one subprocess node in `pool`, which produces `asset`,
+/// with a catch-up window of three days.
 fn definition_text(graph: &str, schedule: &str, asset: &str, pool: &str) -> String {
     definition_with_catchup(graph, schedule, asset, pool, "3d")
 }
@@ -242,8 +242,8 @@ async fn a_new_graph_catches_up_firings_run_their_interval_start_and_downtime_is
         .await
         .unwrap();
 
-    // The cron scheduler rejects the window of `far`, which is beyond the
-    // range of its time type. The daemon registers the set without it.
+    // The cron scheduler rejects the window of `far`, which is beyond the range
+    // of its time type. The daemon registers the set without it.
     h.definitions
         .publish(&definition_with_catchup(
             "far",
@@ -268,9 +268,9 @@ async fn a_new_graph_catches_up_firings_run_their_interval_start_and_downtime_is
     h.clock.advance(Duration::from_secs(1));
     h.wait_for_complete("20260915").await;
 
-    // An edit of the schedule applies on the running daemon. The entry of
-    // the new expression resumes at the watermark, so its firing of 00:00 on
-    // 17 September runs the partition of the interval start, 16 September.
+    // An edit of the schedule applies on the running daemon. The entry of the
+    // new expression resumes at the watermark, so its firing of 00:00 on 17
+    // September runs the partition of the interval start, 16 September.
     let edit = h
         .definitions
         .publish(&definition_text(
@@ -323,8 +323,8 @@ async fn a_sync_pass_adopts_a_changed_pointer_and_refuses_a_definition_that_cann
         Err(Error::UnknownGraph(graph)) if graph == "orders"
     ));
 
-    // The adoption writes the graph record, and the cron entry has the
-    // catch-up window.
+    // The adoption writes the graph record, and the cron entry has the catch-up
+    // window.
     let v1 = h
         .definitions
         .publish(&definition_text(
@@ -391,8 +391,8 @@ async fn a_sync_pass_adopts_a_changed_pointer_and_refuses_a_definition_that_cann
     assert!(started.is_empty());
     assert_eq!(h.graph_run("20260901").await.unwrap().definition, v3.hash);
 
-    // Another tool writes a pointer object without the publish check. The
-    // pass refuses its definition, which produces an asset of `orders`.
+    // Another tool writes a pointer object without the publish check. The pass
+    // refuses its definition, which produces an asset of `orders`.
     let (hash, _) = h
         .definitions
         .put(&definition_text(

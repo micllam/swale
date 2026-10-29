@@ -6,9 +6,9 @@
 
 A scheduled, dependency-ordered orchestrator of asset graphs.
 
-swale runs on the [taquba](https://github.com/micllam/taquba) durable
-execution crates. Every task instance runs as a single workflow run, and the
-record of its outcome and the event for the scheduler commit in one transaction.
+swale runs on the [taquba](https://github.com/micllam/taquba) durable execution
+crates. Every task instance runs as a single workflow run, and the record of its
+outcome and the event for the scheduler commit in one transaction.
 
 ## Definition file
 
@@ -59,24 +59,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Operators
 
-An operator runs a node, and its parameters are the `params` table of the
-node. A parameter string refers to `{{ partition }}`, `{{ run.<field> }}`
-(`id` or `summary`), `{{ upstream.<node>.<path> }}` and `{{ env.<NAME> }}`.
-The upstream reference is a path into the JSON output of an upstream node,
-and the env reference is an environment variable of the daemon.
+An operator runs a node, and its parameters are the `params` table of the node.
+A parameter string refers to `{{ partition }}`, `{{ run.<field> }}` (`id` or
+`summary`), `{{ upstream.<node>.<path> }}` and `{{ env.<NAME> }}`. The upstream
+reference is a path into the JSON output of an upstream node, and the env
+reference is an environment variable of the daemon.
 
-- **`subprocess`** runs `argv` with a JSON document on stdin (the identity,
-  the parameters and the upstream outputs) and reads the output from stdout.
+- **`subprocess`** runs `argv` with a JSON document on stdin (the identity, the
+  parameters and the upstream outputs) and reads the output from stdout.
 - **`shell`** runs `command` with `sh -c`, with the identity in `SWALE_*`
-  variables, the upstream outputs in `SWALE_INPUTS` and the `env` table in
-  the environment, and reads the output from stdout.
-- **`http`** sends `method`, `url`, `headers` and `body` within `timeout`
-  and outputs `{"status": <code>, "body": <value>}`, with a JSON body
-  parsed.
-- **`object_exists`** waits until an object exists at `url`, a store URL,
-  with a poll every `interval` and a failure after `timeout`. No worker
-  is held between polls, and the output is the URL, the size and the
-  last-modified time of the object.
+  variables, the upstream outputs in `SWALE_INPUTS` and the `env` table in the
+  environment, and reads the output from stdout.
+- **`http`** sends `method`, `url`, `headers` and `body` within `timeout` and
+  outputs `{"status": <code>, "body": <value>}`, with a JSON body parsed.
+- **`object_exists`** waits until an object exists at `url`, a store URL, with a
+  poll every `interval` and a failure after `timeout`. No worker is held between
+  polls, and the output is the URL, the size and the last-modified time of the
+  object.
 
 The `subprocess` and `shell` operators kill a program when its run time exceeds
 the `timeout` parameter. A program or a request must be idempotent per attempt.
@@ -113,8 +112,8 @@ again. A member receives those upstream outputs alone.
 
 The daemon fires the `schedule` of a graph, a cron expression with five fields
 in UTC. The partition of a firing is the start of the schedule interval that
-ends at the firing time: a daily schedule at 02:00 that fires on 2026-09-16
-runs the partition `20260915`. A graph with a schedule declares `partition` as
+ends at the firing time: a daily schedule at 02:00 that fires on 2026-09-16 runs
+the partition `20260915`. A graph with a schedule declares `partition` as
 `daily` or `hourly`, and a schedule that fires more than once within a
 partition, such as `0 2,14 * * *` with a daily partition, fails the load.
 
@@ -129,27 +128,27 @@ embeds the library can set `default-features = false`.
 
 `swale validate` loads a definition and prints each fault, one per line.
 
-`swale run` runs a graph for one partition on a store, prints each node's
-record as it is written and waits for the run to settle. A second `run` for
-the same partition resumes the existing graph run, and a process interrupted
-mid-run resumes without repeating a completed node.
+`swale run` runs a graph for one partition on a store, prints each node's record
+as it is written and waits for the run to settle. A second `run` for the same
+partition resumes the existing graph run, and a process interrupted mid-run
+resumes without repeating a completed node.
 
 `swale publish` writes a definition to the store as the current definition of
-its graph. `swale daemon` runs the published graphs until it is interrupted.
-It adopts each published definition within one sync interval, fires each
-schedule and runs the task instances. A graph run keeps the definition it
-started from, so an edit applies from the next graph run. The `default` pool
-always exists, and `--pool name=steps` adds a pool.
+its graph. `swale daemon` runs the published graphs until it is interrupted. It
+adopts each published definition within one sync interval, fires each schedule
+and runs the task instances. A graph run keeps the definition it started from,
+so an edit applies from the next graph run. The `default` pool always exists,
+and `--pool name=steps` adds a pool.
 
-The daemon keeps the records of a settled graph run and the request records
-for `--retention`, ninety days by default. A start of a partition whose
-records were removed runs the graph again.
+The daemon keeps the records of a settled graph run and the request records for
+`--retention`, ninety days by default. A start of a partition whose records were
+removed runs the graph again.
 
-Every command that opens a store takes `--store`: a directory or an object
-store URL (`s3://bucket/prefix`, `gs://bucket/prefix`,
-`az://container/prefix`). A cloud scheme needs the matching cargo feature
-(`aws`, `gcp` or `azure`) and reads the provider's environment variables for
-its credentials. The default store is `~/.swale/store`.
+Every command that opens a store takes `--store`: a directory or an object store
+URL (`s3://bucket/prefix`, `gs://bucket/prefix`, `az://container/prefix`). A
+cloud scheme needs the matching cargo feature (`aws`, `gcp` or `azure`) and
+reads the provider's environment variables for its credentials. The default
+store is `~/.swale/store`.
 
 `swale run` and `swale daemon` open the store as its only writer. A `swale run`
 on the store of a running daemon opens a second writer, and the store then
@@ -179,12 +178,11 @@ order of the sends. With `--wait` the command waits for the outcome and prints
 it.
 
 A rerun of a failed or cancelled node runs the node again, and its downstream
-nodes follow as their trigger rules allow. A rerun of a succeeded node runs
-the node again and, after it, every node downstream of it through an asset
-edge or an all-succeeded edge, each with the new outputs. A task node with
-the all-done or one-failed rule keeps its record. Until such a node runs
-again, the status view shows it as ready, waiting or blocked with its last
-record.
+nodes follow as their trigger rules allow. A rerun of a succeeded node runs the
+node again and, after it, every node downstream of it through an asset edge or
+an all-succeeded edge, each with the new outputs. A task node with the all-done
+or one-failed rule keeps its record. Until such a node runs again, the status
+view shows it as ready, waiting or blocked with its last record.
 
 ```console
 $ swale validate examples/orders_daily.toml
@@ -212,8 +210,8 @@ A command exits with status 0, 1 or 2:
 
 - **0.** The command succeeded. An interrupt ends `swale daemon` with this
   status.
-- **1.** A definition has a fault, a graph run failed, a request was refused
-  or another error occurred.
+- **1.** A definition has a fault, a graph run failed, a request was refused or
+  another error occurred.
 - **2.** The arguments are not valid.
 
 <!-- vale off -->

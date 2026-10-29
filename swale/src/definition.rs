@@ -43,9 +43,9 @@ use crate::error::Error;
 use crate::graph::{Graph, GraphSpec, NodeKind, NodeSpec, Partitioning, Problem, TriggerRule};
 use crate::operator::OperatorSet;
 
-/// The content hash of a definition text, as 64 lowercase hex characters of
-/// SHA-256. A graph run records the hash of the definition it started from,
-/// and every node of the run uses that definition.
+/// The content hash of a definition text, as 64 lower-case hex characters of
+/// SHA-256. A graph run records the hash of the definition it started from, and
+/// every node of the run uses that definition.
 pub fn hash(text: &str) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(text.as_bytes());
@@ -331,8 +331,8 @@ mod tests {
                 "`7w` is not a duration such as `30s`, `5m`, `6h` or `7d`".into()
             )]
         );
-        // A fault of the file and a fault of the graph are in one report,
-        // the file's first.
+        // A fault of the file and a fault of the graph are in one report, the
+        // file's first.
         let text = text.replace("operator = \"subprocess\"", "operator = \"sql\"");
         assert!(matches!(
             problems(&text).as_slice(),

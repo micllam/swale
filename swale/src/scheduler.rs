@@ -5,16 +5,15 @@
 //! terminal hook of each pool writes the node's record and enqueues an
 //! [`Event`], and the [`Scheduler`] is the [`Worker`] of the events queue.
 //! Every submit is idempotent on the deterministic run id, so a redelivered
-//! event and a repeated reconciler pass do not submit a second task
-//! instance.
+//! event and a repeated reconciler pass do not submit a second task instance.
 //!
-//! A job on the triggers queue ([`TRIGGERS_QUEUE`]) is a cron firing without
-//! a payload: the `swale.graph` header identifies the graph, and the
-//! `cron.previous_fire_ms` header, the start of the schedule interval that
-//! the firing ends, determines the partition. The [`TriggerWorker`] reads
-//! both, and [`Scheduler::handle_trigger`] starts the graph run of the
-//! graph's adopted definition for that partition. A start request starts the
-//! run of every partition it lists ([`Scheduler::start_runs`]).
+//! A job on the triggers queue ([`TRIGGERS_QUEUE`]) is a cron firing without a
+//! payload: the `swale.graph` header identifies the graph, and the
+//! `cron.previous_fire_ms` header, the start of the schedule interval that the
+//! firing ends, determines the partition. The [`TriggerWorker`] reads both, and
+//! [`Scheduler::handle_trigger`] starts the graph run of the graph's adopted
+//! definition for that partition. A start request starts the run of every
+//! partition it lists ([`Scheduler::start_runs`]).
 //!
 //! The events worker submits the ready downstreams of a terminated task
 //! instance, and the reconciler ([`Scheduler::reconcile`]) submits every ready
@@ -88,12 +87,12 @@ pub enum Error {
     /// The graph run records a definition the store does not have.
     #[error("definition `{0}` is not in the definition store")]
     UnknownDefinition(String),
-    /// The graph does not have a graph record, so the process did not adopt
-    /// a definition of the graph.
+    /// The graph does not have a graph record, so the process did not adopt a
+    /// definition of the graph.
     #[error("graph `{0}` does not have an adopted definition")]
     UnknownGraph(String),
-    /// The trigger does not list a partition, and it is not a cron firing
-    /// with an earlier occurrence of the schedule.
+    /// The trigger does not list a partition, and it is not a cron firing with
+    /// an earlier occurrence of the schedule.
     #[error("the trigger of graph `{0}` does not determine a partition")]
     NoPartition(String),
     /// The pool of a node does not have a runtime.
@@ -143,9 +142,8 @@ impl From<ReadError> for Error {
 impl Error {
     /// Whether a retry cannot change the outcome: a graph, a graph run or a
     /// node that does not exist, a trigger without a partition, a malformed
-    /// record, or a permanent error of the queue or the runtime. A request
-    /// with such an error is refused, and a worker with it dead-letters its
-    /// job.
+    /// record or a permanent error of the queue or the runtime. A request with
+    /// such an error is refused, and a worker with it dead-letters its job.
     pub fn is_permanent(&self) -> bool {
         match self {
             Error::Queue(e) => e.is_permanent(),
@@ -214,8 +212,7 @@ pub enum RerunOutcome {
 pub struct ReconcileReport {
     /// Active graph runs visited.
     pub active_runs: usize,
-    /// Nodes newly submitted. A submit of a run that was active is not
-    /// counted.
+    /// Nodes newly submitted. A submit of a run that was active is not counted.
     pub submitted: usize,
     /// Graph runs whose state was written.
     pub settled: usize,
@@ -253,15 +250,15 @@ impl Scheduler {
         &self.definitions
     }
 
-    /// The graph record of `graph`, or `None` when the process did not adopt
-    /// a definition of the graph.
+    /// The graph record of `graph`, or `None` when the process did not adopt a
+    /// definition of the graph.
     pub async fn graph_record(&self, graph: &str) -> Result<Option<GraphRecord>, Error> {
         Ok(records::read(self.queue.view(), &records::graph_key(graph)).await?)
     }
 
     /// Starts the graph run of the definition `hash` for `partition`: writes
-    /// the graph run record and submits the root nodes. A second call for
-    /// the same graph and partition does not change anything.
+    /// the graph run record and submits the root nodes. A second call for the
+    /// same graph and partition does not change anything.
     pub async fn start_run(
         &self,
         hash: &str,
@@ -305,11 +302,11 @@ impl Scheduler {
     }
 
     /// Runs `node` again for `partition` at the next rerun count, when its
-    /// upstreams satisfy its trigger rule. The graph run returns to the
-    /// active state. After a succeeded record, the graph run record expects
-    /// the next count of the node and of every node in its
-    /// [`rerun_scope`], so each runs again with the new outputs. The outcome
-    /// states the run id submitted, or why the node was not rerun.
+    /// upstreams satisfy its trigger rule. The graph run returns to the active
+    /// state. After a succeeded record, the graph run record expects the next
+    /// count of the node and of every node in its [`rerun_scope`], so each runs
+    /// again with the new outputs. The outcome states the run id submitted, or
+    /// why the node was not rerun.
     pub async fn rerun(
         &self,
         graph_name: &str,
@@ -439,9 +436,9 @@ impl Scheduler {
         Ok(started.into_iter().next())
     }
 
-    /// Starts the graph run of the adopted definition of `graph_name` for
-    /// every partition of `partitions`. A partition with a graph run is
-    /// unchanged. Returns the partitions whose graph run the call started.
+    /// Starts the graph run of the adopted definition of `graph_name` for every
+    /// partition of `partitions`. A partition with a graph run is unchanged.
+    /// Returns the partitions whose graph run the call started.
     pub async fn start_runs(
         &self,
         graph_name: &str,
@@ -646,8 +643,8 @@ impl Scheduler {
         Ok(records::read(self.queue.view(), &key).await?)
     }
 
-    /// The node records of the graph run of `graph` for `partition`, by
-    /// node name.
+    /// The node records of the graph run of `graph` for `partition`, by node
+    /// name.
     async fn node_records(
         &self,
         graph: &Graph,
@@ -663,8 +660,8 @@ impl Scheduler {
     }
 
     /// Submits every ready node among `candidates` at its next rerun count,
-    /// then settles the active graph run. Returns the count of new submits
-    /// and whether the final state was written.
+    /// then settles the active graph run. Returns the count of new submits and
+    /// whether the final state was written.
     async fn advance<'a>(
         &self,
         graph: &Graph,

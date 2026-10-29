@@ -2,12 +2,12 @@
 //! poll is a step of the run, so no worker is held between polls.
 //!
 //! The URL has the form of a `--store` URL, and a cloud scheme reads the
-//! provider's environment variables for its credentials. The operator opens
-//! the store of a URL once per scheme and host and keeps it for the polls
-//! that follow, so a credential fetched on the first request is kept with
-//! the store. The output is the URL, the size and the last-modified time of
-//! the object. The deadline of the wait is set at the first poll and is the
-//! state of the run between polls.
+//! provider's environment variables for its credentials. The operator opens the
+//! store of a URL once per scheme and host and keeps it for the polls that
+//! follow, so a credential fetched on the first request is kept with the store.
+//! The output is the URL, the size and the last-modified time of the object.
+//! The deadline of the wait is set at the first poll and is the state of the
+//! run between polls.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -33,8 +33,8 @@ pub struct ObjectExistsParams {
         deserialize_with = "duration::deserialize"
     )]
     pub interval: Duration,
-    /// The time after the first poll at which the task instance fails, one
-    /// day by default.
+    /// The time after the first poll at which the task instance fails, one day
+    /// by default.
     #[serde(
         default = "default_timeout",
         deserialize_with = "duration::deserialize"

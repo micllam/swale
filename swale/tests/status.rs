@@ -21,8 +21,8 @@ mod common;
 const PARTITION: &str = "20260915";
 const START_MS: u64 = 1_700_000_000_000;
 
-/// `transform` fails permanently, `load` consumes its asset in the
-/// `warehouse` pool, and `notify` runs after `transform` with `all_done`.
+/// `transform` fails permanently, `load` consumes its asset in the `warehouse`
+/// pool, and `notify` runs after `transform` with `all_done`.
 const DEFINITION: &str = r#"
 [graph]
 name = "orders"
@@ -156,8 +156,8 @@ impl Harness {
         .unwrap()
     }
 
-    /// A reader whose view includes the graph run in `state`. A reader sees
-    /// a write after the writer flushes it, so the open repeats until then.
+    /// A reader whose view includes the graph run in `state`. A reader sees a
+    /// write after the writer flushes it, so the open repeats until then.
     async fn reader_at(&self, state: GraphRunState) -> StatusReader {
         common::wait_until(
             &format!("no reader saw the graph run in {state:?}"),
@@ -174,8 +174,8 @@ impl Harness {
         .await
     }
 
-    /// The status of the graph run once a reader's view satisfies `accept`.
-    /// A reader sees a write after the writer flushes it, so the open repeats
+    /// The status of the graph run once a reader's view satisfies `accept`. A
+    /// reader sees a write after the writer flushes it, so the open repeats
     /// until then.
     async fn run_when(&self, accept: impl Fn(&GraphRunStatus) -> bool) -> GraphRunStatus {
         common::wait_until("no reader saw the expected graph run", async || {

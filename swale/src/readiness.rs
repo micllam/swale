@@ -4,14 +4,14 @@
 //! and nothing else. A record below the rerun count the graph run expects of
 //! its node is superseded by a rerun, and the rule reads the current records
 //! alone ([`current_records`]). A node without a current record is ready when
-//! the records of its upstreams satisfy its trigger rule ([`is_ready`]). It
-//! is waiting when a record that follows can satisfy the rule, and blocked
+//! the records of its upstreams satisfy its trigger rule ([`is_ready`]). It is
+//! waiting when a record that follows can satisfy the rule, and blocked
 //! otherwise ([`node_states`]). A graph run is finished when no node is ready
 //! or waiting ([`settled_state`]): complete when every node is succeeded, and
 //! failed otherwise. A rerun of a node reaches the nodes downstream of it
 //! through an all-succeeded edge ([`rerun_scope`]). The scheduler applies the
-//! rule to submit and to settle, and the status view applies the same rule
-//! to derive the state of a node.
+//! rule to submit and to settle, and the status view applies the same rule to
+//! derive the state of a node.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,19 +31,19 @@ pub enum NodeState {
     /// The record is cancelled.
     Cancelled,
     /// The node does not have a record, and the records of its upstreams
-    /// satisfy its trigger rule. The scheduler submits the node, and its
-    /// task instance runs or waits in the queue of its pool.
+    /// satisfy its trigger rule. The scheduler submits the node, and its task
+    /// instance runs or waits in the queue of its pool.
     Ready,
     /// The node does not have a record, and an upstream without a record can
     /// still satisfy its trigger rule.
     Waiting,
-    /// The node does not have a record, and the records of its upstreams
-    /// cannot satisfy its trigger rule until a rerun changes a record.
+    /// The node does not have a record, and the records of its upstreams cannot
+    /// satisfy its trigger rule until a rerun changes a record.
     Blocked,
 }
 
 impl NodeState {
-    /// The lowercase name, as in the JSON form.
+    /// The lower-case name, as in the JSON form.
     pub fn as_str(&self) -> &'static str {
         match self {
             NodeState::Succeeded => "succeeded",
@@ -77,8 +77,8 @@ impl From<RecordStatus> for NodeState {
     }
 }
 
-/// The records among `records`, by node name, that `run` treats as
-/// current: a record at or past the rerun count the run expects of its node.
+/// The records among `records`, by node name, that `run` treats as current: a
+/// record at or past the rerun count the run expects of its node.
 pub fn current_records(
     run: &GraphRunRecord,
     records: &BTreeMap<String, NodeRecord>,
@@ -90,10 +90,10 @@ pub fn current_records(
         .collect()
 }
 
-/// The nodes a rerun of `node` runs again, in definition order: the node
-/// and every node downstream of it through a node with the all-succeeded
-/// rule. A task node with the all-done or one-failed rule keeps its record,
-/// and the nodes downstream of it are not reached through it.
+/// The nodes a rerun of `node` runs again, in definition order: the node and
+/// every node downstream of it through a node with the all-succeeded rule. A
+/// task node with the all-done or one-failed rule keeps its record, and the
+/// nodes downstream of it are not reached through it.
 pub fn rerun_scope<'a>(graph: &'a Graph, node: &'a Node) -> Vec<&'a Node> {
     let mut scope = BTreeSet::from([node.name()]);
     let mut pending = vec![node];
@@ -133,8 +133,8 @@ pub fn is_ready(node: &Node, records: &BTreeMap<String, NodeRecord>) -> bool {
     }
 }
 
-/// The state of every node of `graph`, by node name, from the node records
-/// of one partition, by node name.
+/// The state of every node of `graph`, by node name, from the node records of
+/// one partition, by node name.
 pub fn node_states(
     graph: &Graph,
     records: &BTreeMap<String, NodeRecord>,
@@ -171,8 +171,8 @@ pub fn node_states(
     states
 }
 
-/// Whether a record that follows for an open upstream can satisfy the
-/// trigger rule of `node`, which its present records do not satisfy.
+/// Whether a record that follows for an open upstream can satisfy the trigger
+/// rule of `node`, which its present records do not satisfy.
 fn can_become_ready(node: &Node, upstreams: &[NodeState]) -> bool {
     match node.trigger_rule() {
         TriggerRule::AllSucceeded => upstreams
@@ -183,9 +183,9 @@ fn can_become_ready(node: &Node, upstreams: &[NodeState]) -> bool {
     }
 }
 
-/// The final state of a graph run from the states of its nodes, or `None`
-/// while a node is ready or waiting: complete when every node is succeeded,
-/// and failed otherwise.
+/// The final state of a graph run from the states of its nodes, or `None` while
+/// a node is ready or waiting: complete when every node is succeeded, and
+/// failed otherwise.
 pub fn settled_state(states: &BTreeMap<String, NodeState>) -> Option<GraphRunState> {
     if states.values().any(NodeState::is_open) {
         return None;
@@ -203,8 +203,8 @@ mod tests {
     use crate::graph::{GraphSpec, NodeKind, NodeSpec};
     use crate::operator::OperatorSet;
 
-    /// `on_failure` runs when `a` fails, `join` needs `b` and `on_failure`,
-    /// and `report` runs when `join` is done.
+    /// `on_failure` runs when `a` fails, `join` needs `b` and `on_failure`, and
+    /// `report` runs when `join` is done.
     const DEFINITION: &str = r#"
 [graph]
 name = "g"
@@ -410,8 +410,8 @@ argv = ["true"]
                 .map(|node| node.name())
                 .collect()
         };
-        // `on_failure` and `report` keep their records, and `join` is
-        // reached through `b`.
+        // `on_failure` and `report` keep their records, and `join` is reached
+        // through `b`.
         assert_eq!(scope("a"), ["a", "b", "join"]);
         assert_eq!(scope("b"), ["b", "join"]);
         assert_eq!(scope("on_failure"), ["on_failure", "join"]);
