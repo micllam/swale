@@ -19,7 +19,10 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use taquba::object_store::ObjectStore;
-use taquba::{JobRecord, QueueReader, QueueStats, ReaderMode, ReaderOptions};
+use taquba::{
+    InboxOutcome, JobRecord, JobStatus, QueueReader, QueueStats, ReaderMode, ReaderOptions,
+    Rejection,
+};
 use taquba_workflow::{MemoStore, RunState, WorkflowView};
 
 use crate::definition_store::{DefinitionError, DefinitionStore};
@@ -30,7 +33,7 @@ use crate::records::{
     self, Entry, GRAPH_RUNS_PREFIX, GRAPHS_PREFIX, GraphRecord, GraphRunRecord, GraphRunState,
     NodeRecord, ReadError, RecordError, RequestRecord,
 };
-use crate::request::RequestId;
+use crate::request::{REQUESTS_QUEUE, RequestId};
 use crate::task;
 
 /// A failure of a status read.
@@ -124,6 +127,23 @@ impl std::fmt::Display for InstanceState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// The state of a request, as [`StatusReader::request`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestState {
+    /// The request waits for a pass of the inbox or for the request worker.
+    Waiting {
+        /// The error of the last attempt of the request job, or `None` before a
+        /// failed attempt.
+        last_error: Option<String>,
+    },
+    /// The scheduler applied the request, with the record of its outcome.
+    Applied(RequestRecord),
+    /// The inbox rejected the entry of the request for the reason.
+    Rejected(Rejection),
+    /// The request job was dead-lettered with the error of its last attempt.
+    Failed(String),
 }
 
 /// The task instance of a node that the runtime of its pool has.
@@ -329,10 +349,32 @@ impl StatusReader {
         }))
     }
 
-    /// The record of the request `id`, or `None` while the daemon did not
-    /// apply the request.
-    pub async fn request(&self, id: &RequestId) -> Result<Option<RequestRecord>, Error> {
-        Ok(records::read(self.reader.view(), &records::request_key(id)).await?)
+    /// The state of the request `id`, read from its record, from the record of
+    /// its inbox entry and from its job.
+    pub async fn request(&self, id: &RequestId) -> Result<RequestState, Error> {
+        let view = self.reader.view();
+        let key = records::request_key(id);
+        if let Some(record) = records::read(view, &key).await? {
+            return Ok(RequestState::Applied(record));
+        }
+        let inbox = view.inbox_record(REQUESTS_QUEUE, id.as_str()).await?;
+        if let Some(InboxOutcome::Rejected(reason)) = inbox.map(|record| record.outcome) {
+            return Ok(RequestState::Rejected(reason));
+        }
+        let job = view.job_record(id.as_str()).await?;
+        Ok(match job {
+            Some(job) if job.status == JobStatus::Dead => {
+                RequestState::Failed(job.last_error.unwrap_or_default())
+            }
+            Some(job) if job.status != JobStatus::Done => RequestState::Waiting {
+                last_error: job.last_error,
+            },
+            // The record commits before the job settles.
+            _ => match records::read(view, &key).await? {
+                Some(record) => RequestState::Applied(record),
+                None => RequestState::Waiting { last_error: None },
+            },
+        })
     }
 
     /// The job counts of every queue of the store, by queue name.

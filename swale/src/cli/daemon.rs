@@ -31,13 +31,11 @@ pub(crate) async fn daemon(
     let definitions = store.definitions(operators.clone());
     let mut pool_sizes = BTreeMap::from([("default".to_string(), concurrency)]);
     pool_sizes.extend(pools);
-    let requests = store.requests();
     let runtime = Runtime::open(store, operators, definitions, &pool_sizes).await?;
     let daemon = Daemon::new(
         runtime.queue.clone(),
         runtime.scheduler.clone(),
         runtime.pools.clone(),
-        requests,
     );
     let result = daemon
         .run(

@@ -42,6 +42,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** the commands and the `object_exists` operator panic when a
   variable of the environment is not UTF-8, where 0.2.0 omitted the variable.
   Before the upgrade, remove such a variable from the environment of swale.
+- **Breaking:** a request command sends its request through the inbox of the
+  queue, and the writer of the store, `swale daemon` or `swale run`, applies it
+  within seconds. Open the writer's queue with an inbox that accepts
+  `REQUESTS_QUEUE`, and let a 0.2.0 daemon apply the pending request objects
+  before the upgrade.
+- **Breaking:** `StatusReader::request` returns a `RequestState`, which reports
+  a rejected inbox entry and a dead-lettered request job, and `--wait` fails
+  with the reason of either. Match `RequestState::Applied` where the code tested
+  for `Some`.
+
+### Removed
+
+- **Breaking:** `RequestStore`, `Daemon::apply_requests` and `RequestReport` are
+  removed, and `Daemon::new` does not take a request store. Send a request with
+  `Request::send` in place of `RequestStore::submit`.
 
 ### Fixed
 

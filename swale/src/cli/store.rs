@@ -9,12 +9,12 @@ use std::time::Duration;
 
 use swale::store::store_path;
 use swale::{
-    DefinitionStore, OperatorSet, Pools, RecordHook, RequestStore, Scheduler, StatusReader,
+    DefinitionStore, OperatorSet, Pools, REQUESTS_QUEUE, RecordHook, Scheduler, StatusReader,
 };
-use taquba::Queue;
 use taquba::object_store::ObjectStore;
 use taquba::object_store::local::LocalFileSystem;
 use taquba::object_store::path::Path as ObjectPath;
+use taquba::{InboxOptions, InboxSender, OpenOptions, Queue, default_inbox_path};
 
 use super::CommandResult;
 
@@ -87,9 +87,9 @@ impl Store {
         ))
     }
 
-    /// The request store.
-    pub(crate) fn requests(&self) -> RequestStore {
-        RequestStore::new(self.objects.clone(), &self.prefix)
+    /// The sender of the inbox of the queue.
+    pub(crate) fn inbox(&self) -> InboxSender {
+        InboxSender::new(self.objects.clone(), default_inbox_path(&self.queue_path))
     }
 }
 
@@ -153,7 +153,10 @@ impl Runtime {
         definitions: Arc<DefinitionStore>,
         pool_sizes: &BTreeMap<String, usize>,
     ) -> Result<Runtime, Box<dyn std::error::Error>> {
-        let queue = Arc::new(Queue::open(store.objects.clone(), &store.queue_path).await?);
+        let options = OpenOptions::default().inbox(InboxOptions::new([REQUESTS_QUEUE]));
+        let queue = Arc::new(
+            Queue::open_with_options(store.objects.clone(), &store.queue_path, options).await?,
+        );
         let hook = RecordHook::new(queue.clock());
         let mut pools = Pools::builder(queue.clone(), store.objects, operators, hook)
             .poll_interval(Duration::from_millis(100))

@@ -3,9 +3,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use swale::REQUESTS_QUEUE;
 use taquba::object_store::ObjectStore;
 use taquba::object_store::memory::InMemory;
-use taquba::{MockClock, OpenOptions, Queue, QueueConfig};
+use taquba::{InboxOptions, MockClock, OpenOptions, Queue, QueueConfig};
 
 /// The path of the queue within the store.
 pub const QUEUE_PATH: &str = "test";
@@ -17,15 +18,16 @@ const WAIT_DEADLINE: Duration = Duration::from_secs(30);
 const WAIT_INTERVAL: Duration = Duration::from_millis(20);
 
 /// An in-memory store and a queue over it at [`QUEUE_PATH`], with `clock`,
-/// without a retry backoff and with a reaper and a scheduler interval of
-/// ten milliseconds.
+/// without a retry backoff, with a reaper and a scheduler interval of ten
+/// milliseconds and with an inbox that accepts the requests queue.
 pub async fn open_queue(clock: MockClock) -> (Arc<dyn ObjectStore>, Arc<Queue>) {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let opts = OpenOptions::default()
         .clock(Arc::new(clock))
         .default_queue_config(QueueConfig::default().retry_backoff_base(Duration::ZERO))
         .reaper_interval(Duration::from_millis(10))
-        .scheduler_interval(Duration::from_millis(10));
+        .scheduler_interval(Duration::from_millis(10))
+        .inbox(InboxOptions::new([REQUESTS_QUEUE]));
     let queue = Queue::open_with_options(store.clone(), QUEUE_PATH, opts)
         .await
         .unwrap();

@@ -1,18 +1,18 @@
-//! `swale start`, `swale rerun` and `swale cancel`: the commands that write
-//! a request.
+//! `swale start`, `swale rerun` and `swale cancel`: the commands that send a
+//! request.
 
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use swale::records::RequestOutcome;
-use swale::{OperatorSet, Partition, Request, RequestId, StatusReader};
+use swale::{OperatorSet, Partition, Request, RequestId, RequestState, StatusReader};
 use taquba::{Clock, QueueReader, ReaderMode, ReaderOptions, SystemClock};
 
 use super::CommandResult;
 use super::store::{StoreArg, open_store};
 
-/// The arguments of a command that writes a request.
+/// The arguments of a command that sends a request.
 #[derive(clap::Args)]
 pub(crate) struct RequestArgs {
     #[command(flatten)]
@@ -22,18 +22,18 @@ pub(crate) struct RequestArgs {
     pub(crate) wait: bool,
 }
 
-/// Writes `request` to the store and, with `--wait`, prints its outcome
-/// once the daemon applies it.
+/// Sends `request` through the inbox of the store and, with `--wait`, prints
+/// its outcome once the writer of the store applies it.
 pub(crate) async fn send_request(request: Request, args: RequestArgs) -> CommandResult {
     let id = RequestId::generate(SystemClock.now_ms());
     let store = open_store(args.store)?;
-    store.requests().submit(&id, &request).await?;
+    request.send(&store.inbox(), &id).await?;
     if !args.wait {
-        println!("request {id}: written, the daemon applies it at its next sync pass");
+        println!("request {id}: sent, the writer of the store applies it");
         return Ok(ExitCode::SUCCESS);
     }
-    // The wait polls the record, so the reader refreshes its view every
-    // second.
+    // The wait polls the state of the request, so the reader refreshes its view
+    // every second.
     let options = ReaderOptions::default()
         .mode(ReaderMode::FollowLatest)
         .manifest_poll_interval(Duration::from_secs(1));
@@ -44,8 +44,13 @@ pub(crate) async fn send_request(request: Request, args: RequestArgs) -> Command
         store.definitions(Arc::new(OperatorSet::builtin())),
     );
     let record = loop {
-        if let Some(record) = reader.request(&id).await? {
-            break record;
+        match reader.request(&id).await? {
+            RequestState::Applied(record) => break Ok(record),
+            RequestState::Rejected(reason) => {
+                break Err(format!("request {id}: rejected by the inbox, {reason}"));
+            }
+            RequestState::Failed(error) => break Err(format!("request {id}: failed, {error}")),
+            RequestState::Waiting { .. } => {}
         }
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -57,7 +62,7 @@ pub(crate) async fn send_request(request: Request, args: RequestArgs) -> Command
         }
     };
     reader.close().await?;
-    match record.outcome {
+    match record?.outcome {
         RequestOutcome::Started { partitions } => {
             let keys: Vec<String> = partitions.iter().map(Partition::to_string).collect();
             if keys.is_empty() {

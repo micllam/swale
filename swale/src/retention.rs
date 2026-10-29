@@ -13,9 +13,7 @@
 //! definition does not load is kept, and the next pass reads its entry again. A
 //! start of a partition whose records were removed runs the graph again.
 //!
-//! The daemon runs the pass after a request pass that succeeded, so a request
-//! object with a record is removed before the record expires, and a request is
-//! not applied twice.
+//! The daemon runs the pass after each sync pass.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};

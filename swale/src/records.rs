@@ -310,7 +310,7 @@ pub enum RequestOutcome {
     },
 }
 
-/// The record of an applied request. The daemon is the only writer of the
+/// The record of an applied request. The scheduler is the only writer of the
 /// record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestRecord {
@@ -323,8 +323,7 @@ pub struct RequestRecord {
     pub outcome: RequestOutcome,
 }
 
-/// A type with a JSON byte form: the records, and the payloads of the
-/// queues and the request objects.
+/// A type with a JSON byte form: the records and the payloads of the queues.
 pub trait JsonBytes: Serialize + DeserializeOwned {
     /// The JSON form, with maps in key order.
     fn to_bytes(&self) -> Vec<u8> {

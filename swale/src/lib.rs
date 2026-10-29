@@ -136,12 +136,13 @@
 //! <queue>` lists the dead jobs of one queue. Both commands only read from the
 //! store, so they can run alongside a daemon.
 //!
-//! `swale start <graph> <partition>...` starts the graph run of each
-//! partition, `swale rerun <graph> <partition> <node>` runs a node again, and
-//! `swale cancel <graph> <partition>` cancels an active graph run. Each
-//! command writes a request to the store and does not open the queue, and
-//! the daemon applies the request at its next sync pass. With `--wait` the
-//! command waits for the outcome and prints it.
+//! `swale start <graph> <partition>...` starts the graph run of each partition,
+//! `swale rerun <graph> <partition> <node>` runs a node again, and
+//! `swale cancel <graph> <partition>` cancels an active graph run. Each command
+//! sends a request through the inbox of the store and does not open the queue.
+//! The writer of the store, `swale daemon` or `swale run`, applies the requests
+//! in the order of the sends. With `--wait` the command waits for the outcome
+//! and prints it.
 //!
 //! A rerun of a failed or cancelled node runs the node again, and its
 //! downstream nodes follow as their trigger rules allow. A rerun of a
@@ -201,7 +202,7 @@ pub mod store;
 pub mod task;
 pub mod template;
 
-pub use daemon::{Daemon, DaemonOptions, RequestReport};
+pub use daemon::{Daemon, DaemonOptions};
 pub use definition::{load_path, load_str};
 pub use definition_store::{DefinitionError, DefinitionStore, Published};
 pub use error::Error;
@@ -215,11 +216,11 @@ pub use records::{
     GraphRecord, GraphRunRecord, GraphRunState, JsonBytes, NodeRecord, RecordStatus,
     RequestOutcome, RequestRecord,
 };
-pub use request::{Request, RequestId, RequestStore};
+pub use request::{REQUESTS_QUEUE, Request, RequestId, RequestWorker};
 pub use scheduler::{RerunOutcome, Scheduler, SchedulerOptions, StartOutcome, TRIGGERS_QUEUE};
 pub use status::{
-    GraphRunStatus, GraphStatus, InstanceState, NodeStatus, RunCounts, RunSummary, StatusReader,
-    TaskInstance,
+    GraphRunStatus, GraphStatus, InstanceState, NodeStatus, RequestState, RunCounts, RunSummary,
+    StatusReader, TaskInstance,
 };
 pub use task::TaskIdentity;
 pub use template::Template;

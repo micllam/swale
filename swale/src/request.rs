@@ -1,17 +1,17 @@
-//! The request: an operation on a running daemon, written to the object
-//! store by a command and applied by the daemon.
+//! The request: an operation on a running daemon, sent by a command through the
+//! inbox of the queue and applied by the scheduler.
 //!
-//! A command writes a [`Request`] as the object `{store prefix}/requests/{id}`
-//! and never opens the queue. The daemon reads the objects at every sync
-//! pass, applies each request in id order, records the outcome as the
-//! [`RequestRecord`] at the KV key `swale/requests/{id}` and removes the
-//! object. A request is applied once: a pass that finds the record of an
-//! object only removes the object.
+//! A command sends a [`Request`] with [`Request::send`] and never opens the
+//! queue. The writer of the queue enqueues it as a job on [`REQUESTS_QUEUE`]
+//! with the request id as the job id. The [`RequestWorker`] of the scheduler
+//! applies the jobs one at a time in send order, and records the outcome as the
+//! [`RequestRecord`] at the KV key `swale/requests/{id}`.
 //!
-//! The daemon applies a request through [`Scheduler::handle_request`]. The
-//! record of a rerun commits with the submit of the task instance. A request
-//! applied a second time after a crash therefore does not submit a second task
-//! instance. The expiry index entry of a record commits with the record.
+//! The worker applies a request through [`Scheduler::handle_request`], which
+//! returns the existing record of an applied request. The record of a rerun
+//! commits with the submit of the task instance. A request job delivered a
+//! second time after a crash therefore does not submit a second task instance.
+//! The expiry index entry of a record commits with the record.
 
 use std::fmt;
 use std::str::FromStr;
@@ -19,16 +19,21 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
-use taquba::SettlementEffects;
-use taquba::object_store::path::Path as ObjectPath;
-use taquba::object_store::{self, ObjectStore};
+use taquba::{
+    EnqueueEntry, EnqueueOptions, InboxSender, JobRecord, LeaseHandle, PermanentFailure,
+    SettlementEffects, Worker, WorkerError,
+};
 use taquba_workflow::RunId;
 
 use crate::partition::Partition;
 use crate::records::JsonBytes;
 use crate::records::{self, Expiring, RequestOutcome, RequestRecord};
-use crate::scheduler::{Error, RerunOutcome, Scheduler};
-use crate::store::ObjectPrefix;
+use crate::scheduler::{Error, RerunOutcome, Scheduler, worker_error};
+
+/// The queue of the request jobs. The writer of the queue must open it with an
+/// inbox that accepts this queue, such as
+/// `OpenOptions::inbox(InboxOptions::new([REQUESTS_QUEUE]))`.
+pub const REQUESTS_QUEUE: &str = "swale-requests";
 
 /// Maximum length of a request id in bytes.
 pub const MAX_REQUEST_ID_LEN: usize = 64;
@@ -120,73 +125,78 @@ pub enum Request {
 
 impl JsonBytes for Request {}
 
-/// The request objects of a deployment.
-pub struct RequestStore {
-    objects: ObjectPrefix,
+impl Request {
+    /// Sends the request with `id` through `sender`, the sender of the inbox of
+    /// the queue. The request job takes `id` as its job id.
+    pub async fn send(&self, sender: &InboxSender, id: &RequestId) -> Result<(), taquba::Error> {
+        let entry = EnqueueEntry {
+            payload: self.to_bytes(),
+            options: EnqueueOptions {
+                id_override: Some(id.to_string()),
+                ..EnqueueOptions::default()
+            },
+        };
+        sender
+            .send_with_id(REQUESTS_QUEUE, id.as_str(), entry)
+            .await
+    }
 }
 
-impl RequestStore {
-    /// A request store within `store_prefix` of `store`.
-    pub fn new(store: Arc<dyn ObjectStore>, store_prefix: &str) -> Self {
-        RequestStore {
-            objects: ObjectPrefix::new(store, store_prefix, "requests"),
+/// The [`Worker`] of the requests queue. A job whose id is not a request id or
+/// whose payload is not a request is dead-lettered.
+pub struct RequestWorker {
+    scheduler: Arc<Scheduler>,
+}
+
+impl RequestWorker {
+    /// A worker that applies requests on `scheduler`.
+    pub fn new(scheduler: Arc<Scheduler>) -> Self {
+        RequestWorker { scheduler }
+    }
+}
+
+impl Worker for RequestWorker {
+    async fn process(&self, job: &JobRecord, _lease: &LeaseHandle) -> Result<(), WorkerError> {
+        let id =
+            RequestId::new(job.id.clone()).map_err(|e| PermanentFailure::new(e.to_string()))?;
+        let request = Request::from_bytes(&job.payload)
+            .map_err(|e| PermanentFailure::new(format!("the payload is not a request: {e}")))?;
+        let record = self
+            .scheduler
+            .handle_request(&id, &request)
+            .await
+            .map_err(worker_error)?;
+        log_outcome(&id, &record);
+        Ok(())
+    }
+}
+
+fn log_outcome(id: &RequestId, record: &RequestRecord) {
+    match &record.outcome {
+        RequestOutcome::Refused { reason } => {
+            tracing::warn!(request = %id, %reason, "request refused");
         }
-    }
-
-    /// Writes the object of `request` with `id`.
-    pub async fn submit(
-        &self,
-        id: &RequestId,
-        request: &Request,
-    ) -> Result<(), object_store::Error> {
-        self.objects.put(&self.path(id), request.to_bytes()).await
-    }
-
-    /// The request objects, in id order, with the bytes of each. An object
-    /// whose name is not a request id is skipped.
-    pub async fn list(&self) -> Result<Vec<(RequestId, Vec<u8>)>, object_store::Error> {
-        let prefix = ObjectPath::from(self.objects.prefix());
-        let mut requests = Vec::new();
-        for object in self.objects.list(&prefix).await? {
-            let Some(id) = object
-                .location
-                .filename()
-                .and_then(|name| RequestId::new(name).ok())
-            else {
-                tracing::warn!(object = %object.location, "the object is not a request");
-                continue;
-            };
-            // An object removed between the listing and the read is skipped.
-            if let Some(bytes) = self.objects.get(&object.location).await? {
-                requests.push((id, bytes));
-            }
+        outcome => {
+            tracing::info!(request = %id, ?outcome, "request applied");
         }
-        requests.sort();
-        Ok(requests)
-    }
-
-    /// Removes the object of the request `id`. An absent object is not an
-    /// error.
-    pub async fn remove(&self, id: &RequestId) -> Result<(), object_store::Error> {
-        self.objects.delete(&self.path(id)).await
-    }
-
-    fn path(&self, id: &RequestId) -> ObjectPath {
-        self.objects.path(id.as_str())
     }
 }
 
 impl Scheduler {
-    /// Applies the request `id` and writes its record at the request's
-    /// key. A request that refers to an absent graph, graph run or node, or
-    /// that the state of the graph run does not admit, is refused in the
-    /// record. A failure of the store is returned, and the record is not
-    /// written.
+    /// Applies the request `id` and writes its record at the request's key, or
+    /// returns the existing record of an applied request. A request that refers
+    /// to an absent graph, graph run or node is refused in the record, as is a
+    /// request that the state of the graph run does not admit. A failure of the
+    /// store is returned, and the record is not written.
     pub async fn handle_request(
         &self,
         id: &RequestId,
         request: &Request,
     ) -> Result<RequestRecord, Error> {
+        let key = records::request_key(id);
+        if let Some(record) = records::read::<RequestRecord>(self.queue.view(), &key).await? {
+            return Ok(record);
+        }
         let handled_at_ms = self.clock.now_ms();
         let record = |outcome| RequestRecord {
             request: request.clone(),
@@ -273,8 +283,6 @@ fn refusal(error: Error) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use taquba::object_store::ObjectStoreExt;
-    use taquba::object_store::memory::InMemory;
 
     #[test]
     fn a_generated_id_sorts_by_time_and_the_charset_is_checked() {
@@ -320,50 +328,5 @@ mod tests {
             assert_eq!(Request::from_bytes(&request.to_bytes()).unwrap(), request);
         }
         assert!(Request::from_bytes(br#"{"kind":"forget","graph":"orders"}"#).is_err());
-    }
-
-    #[tokio::test]
-    async fn the_store_lists_the_objects_within_the_prefix_in_id_order() {
-        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let store = RequestStore::new(objects.clone(), "deploy");
-        let cancel = Request::Cancel {
-            graph: "orders".into(),
-            partition: Partition::new("20260915").unwrap(),
-        };
-        let later = RequestId::new("b").unwrap();
-        let earlier = RequestId::new("a").unwrap();
-        store.submit(&later, &cancel).await.unwrap();
-        store.submit(&earlier, &cancel).await.unwrap();
-        objects
-            .put(
-                &ObjectPath::from("deploy/requests/not an id"),
-                b"{}".to_vec().into(),
-            )
-            .await
-            .unwrap();
-        objects
-            .put(&ObjectPath::from("deploy/other/c"), b"{}".to_vec().into())
-            .await
-            .unwrap();
-        let object = objects
-            .get(&ObjectPath::from("deploy/requests/a"))
-            .await
-            .unwrap();
-        assert_eq!(object.bytes().await.unwrap(), cancel.to_bytes());
-
-        let listed = store.list().await.unwrap();
-        assert_eq!(
-            listed,
-            [
-                (earlier.clone(), cancel.to_bytes()),
-                (later.clone(), cancel.to_bytes())
-            ]
-        );
-
-        store.remove(&earlier).await.unwrap();
-        store.remove(&earlier).await.unwrap();
-        let listed = store.list().await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].0, later);
     }
 }

@@ -26,10 +26,10 @@
 //!
 //! A request from another process ([`Scheduler::handle_request`], in the
 //! [`crate::request`] module) starts graph runs, reruns a node or cancels a
-//! graph run. A rerun of a succeeded node writes the expected rerun count of
-//! the node and its downstreams to the graph run record before the submit.
-//! A crash between the two writes leaves a run that the reconciler
-//! completes.
+//! graph run. The [`RequestWorker`] applies each job of the requests queue. A
+//! rerun of a succeeded node writes the expected rerun count of the node and
+//! its downstreams to the graph run record before the submit. A crash between
+//! the two writes leaves a run that the reconciler completes.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -58,6 +58,7 @@ use crate::records::{
     self, EXPIRY_PREFIX, Entry, Expiring, GraphRecord, GraphRunRecord, GraphRunState, NodeRecord,
     ReadError, RecordError, RecordStatus,
 };
+use crate::request::{REQUESTS_QUEUE, RequestWorker};
 use crate::task::{self, HEADER_GRAPH, TaskIdentity};
 
 /// The queue of the triggers.
@@ -542,14 +543,16 @@ impl Scheduler {
         Ok(report)
     }
 
-    /// Runs the events worker, the triggers worker and the reconciler until
-    /// `shutdown` resolves.
+    /// Runs the events worker, the triggers worker, the request worker and the
+    /// reconciler until `shutdown` resolves. The request worker handles one
+    /// request at a time.
     pub async fn run<F: Future<Output = ()>>(
         self: Arc<Self>,
         options: SchedulerOptions,
         shutdown: F,
     ) -> Result<(), Error> {
         let stop = CancellationToken::new();
+        let request_worker = RequestWorker::new(self.clone());
         let worker = taquba::run_worker_concurrent(
             &self.queue,
             EVENTS_QUEUE,
@@ -563,6 +566,13 @@ impl Scheduler {
             TRIGGERS_QUEUE,
             Arc::new(TriggerWorker::new(self.clone())),
             options.concurrency,
+            options.poll_interval,
+            stop.clone().cancelled_owned(),
+        );
+        let requests = taquba::run_worker(
+            &self.queue,
+            REQUESTS_QUEUE,
+            &request_worker,
             options.poll_interval,
             stop.clone().cancelled_owned(),
         );
@@ -581,8 +591,9 @@ impl Scheduler {
             }
         };
         let mut all = std::pin::pin!(async {
-            let (worker, triggers, ()) = tokio::join!(worker, triggers, reconciler);
-            worker.and(triggers)
+            let (worker, triggers, requests, ()) =
+                tokio::join!(worker, triggers, requests, reconciler);
+            worker.and(triggers).and(requests)
         });
         tokio::select! {
             result = &mut all => Ok(result?),
@@ -864,7 +875,7 @@ fn identity(
 
 /// The failure of a worker for `error`: permanent when the error is, and
 /// retried otherwise.
-fn worker_error(error: Error) -> WorkerError {
+pub(crate) fn worker_error(error: Error) -> WorkerError {
     if error.is_permanent() {
         PermanentFailure::new(error.to_string()).into()
     } else {

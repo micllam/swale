@@ -143,9 +143,10 @@ they can run alongside a daemon.
 `swale start <graph> <partition>...` starts the graph run of each partition,
 `swale rerun <graph> <partition> <node>` runs a node again, and
 `swale cancel <graph> <partition>` cancels an active graph run. Each command
-writes a request to the store and does not open the queue, and the daemon
-applies the request at its next sync pass. With `--wait` the command waits
-for the outcome and prints it.
+sends a request through the inbox of the store and does not open the queue. The
+writer of the store, `swale daemon` or `swale run`, applies the requests in the
+order of the sends. With `--wait` the command waits for the outcome and prints
+it.
 
 A rerun of a failed or cancelled node runs the node again, and its downstream
 nodes follow as their trigger rules allow. A rerun of a succeeded node runs

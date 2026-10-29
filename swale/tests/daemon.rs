@@ -13,12 +13,16 @@ use swale::records::{
 use swale::retention::ExpireReport;
 use swale::scheduler::{Error, firing_headers};
 use swale::{
-    Daemon, DaemonOptions, DefinitionStore, GraphRecord, OperatorSet, Partition, Pools, RecordHook,
-    Request, RequestId, RequestStore, Scheduler, SchedulerOptions, StatusReader, TRIGGERS_QUEUE,
+    Daemon, DaemonOptions, DefinitionStore, GraphRecord, OperatorSet, Partition, Pools,
+    REQUESTS_QUEUE, RecordHook, Request, RequestId, RequestRecord, RequestState, Scheduler,
+    SchedulerOptions, StatusReader, TRIGGERS_QUEUE,
 };
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{ObjectStore, ObjectStoreExt};
-use taquba::{KvOrder, MockClock, Queue};
+use taquba::{
+    EnqueueEntry, EnqueueOptions, InboxSender, KvOrder, MockClock, Queue, Rejection, WorkerHandle,
+    default_inbox_path,
+};
 use taquba_cron::{Backfill, BackfillStart, Schedule};
 use tokio_util::sync::CancellationToken;
 
@@ -84,8 +88,41 @@ impl Harness {
         }
     }
 
-    fn requests(&self) -> RequestStore {
-        RequestStore::new(self.objects.clone(), "")
+    fn inbox(&self) -> InboxSender {
+        InboxSender::new(self.objects.clone(), default_inbox_path(common::QUEUE_PATH))
+    }
+
+    /// Sends `request` with `id`, runs a pass of the inbox and waits for the
+    /// outcome in the request record. The scheduler must run.
+    async fn request(&self, id: &RequestId, request: &Request) -> RequestOutcome {
+        request.send(&self.inbox(), id).await.unwrap();
+        self.queue.apply_inbox_now().await.unwrap();
+        self.outcome(id).await
+    }
+
+    /// The outcome in the record of the request `id`, once the record exists.
+    async fn outcome(&self, id: &RequestId) -> RequestOutcome {
+        common::wait_until("the request was never applied", async || {
+            let bytes = self.queue.view().kv_get(&request_key(id)).await.unwrap()?;
+            Some(RequestRecord::from_bytes(&bytes).unwrap().outcome)
+        })
+        .await
+    }
+
+    /// Spawns the scheduler with the poll interval of ten milliseconds.
+    fn spawn_scheduler(
+        &self,
+        scheduler: &Arc<Scheduler>,
+        stop: &CancellationToken,
+    ) -> WorkerHandle<Result<(), Error>> {
+        scheduler.clone().spawn(
+            SchedulerOptions {
+                concurrency: 2,
+                poll_interval: Duration::from_millis(10),
+                reconcile_interval: Duration::from_secs(3600),
+            },
+            stop.clone().cancelled_owned(),
+        )
     }
 
     /// A daemon with the `default` pool, as a process start builds it.
@@ -111,7 +148,6 @@ impl Harness {
             self.queue.clone(),
             scheduler.clone(),
             pools.clone(),
-            self.requests(),
         ));
         (daemon, scheduler, pools)
     }
@@ -383,7 +419,7 @@ async fn a_sync_pass_adopts_a_changed_pointer_and_refuses_a_definition_that_cann
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_request_in_the_store_is_applied_once_and_its_record_is_readable() {
+async fn a_request_through_the_inbox_is_applied_once_and_its_state_is_readable() {
     let h = Harness::start("2026-09-16T12:00:00Z").await;
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("requests");
     let _ = std::fs::remove_dir_all(&dir);
@@ -406,56 +442,43 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
         marker.display()
     );
     h.definitions.publish(&definition).await.unwrap();
-    let (daemon, _, pools) = h.daemon();
+    let (daemon, scheduler, pools) = h.daemon();
     let stop = CancellationToken::new();
-    let pool_handles = pools.spawn(&stop);
+    let pool_stop = CancellationToken::new();
+    let pool_handles = pools.spawn(&pool_stop);
+    let scheduler_handle = h.spawn_scheduler(&scheduler, &stop);
     daemon.sync().await.unwrap();
-    let requests = h.requests();
     let partition = |key: &str| Partition::new(key).unwrap();
     let id = |n: u64| RequestId::new(format!("req-{n}")).unwrap();
 
-    // A start request runs the partitions without a graph run, and the pass
-    // removes the object.
+    // A start request runs the partitions without a graph run.
     let start = Request::Start {
         graph: "orders".into(),
         partitions: vec![partition("20260915"), partition("20260916")],
     };
-    requests.submit(&id(1), &start).await.unwrap();
-    let report = daemon.apply_requests().await.unwrap();
     assert_eq!(
-        report.applied,
-        [(
-            id(1),
-            RequestOutcome::Started {
-                partitions: vec![partition("20260915"), partition("20260916")]
-            }
-        )]
+        h.request(&id(1), &start).await,
+        RequestOutcome::Started {
+            partitions: vec![partition("20260915"), partition("20260916")]
+        }
     );
-    assert!(requests.list().await.unwrap().is_empty());
     for key in ["20260915", "20260916"] {
-        assert_eq!(h.graph_run(key).await.unwrap().state, GraphRunState::Active);
+        assert!(h.graph_run(key).await.is_some(), "{key}");
         h.wait_for_extract(key, RecordStatus::Failed).await;
     }
-    requests
-        .submit(
-            &id(2),
-            &Request::Start {
-                graph: "orders".into(),
-                partitions: vec![partition("20260915"), partition("20260917")],
-            },
-        )
-        .await
-        .unwrap();
-    let report = daemon.apply_requests().await.unwrap();
+    let start = Request::Start {
+        graph: "orders".into(),
+        partitions: vec![partition("20260915"), partition("20260917")],
+    };
     assert_eq!(
-        report.applied[0].1,
+        h.request(&id(2), &start).await,
         RequestOutcome::Started {
             partitions: vec![partition("20260917")]
         }
     );
 
-    // A rerun request submits the next count, and its record commits with
-    // the submit.
+    // A rerun request submits the next count, and its record commits with the
+    // submit.
     std::fs::write(&marker, b"").unwrap();
     h.clock.advance(Duration::from_secs(60));
     let rerun = Request::Rerun {
@@ -463,16 +486,11 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
         partition: partition("20260915"),
         node: "extract".into(),
     };
-    requests.submit(&id(3), &rerun).await.unwrap();
-    let report = daemon.apply_requests().await.unwrap();
     assert_eq!(
-        report.applied,
-        [(
-            id(3),
-            RequestOutcome::Rerun {
-                run_id: "orders-20260915-extract-r1".into()
-            }
-        )]
+        h.request(&id(3), &rerun).await,
+        RequestOutcome::Rerun {
+            run_id: "orders-20260915-extract-r1".into()
+        }
     );
     let record = h
         .wait_for_extract("20260915", RecordStatus::Succeeded)
@@ -485,25 +503,17 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
         .await
         .unwrap()
         .unwrap();
-    let recorded = swale::RequestRecord::from_bytes(&bytes).unwrap();
+    let recorded = RequestRecord::from_bytes(&bytes).unwrap();
     assert_eq!(recorded.request, rerun);
     assert_eq!(recorded.handled_at_ms, ms("2026-09-16T12:01:00Z"));
 
-    // The object of an applied request, present again after a crash between
-    // the record and the removal, is removed without a second application.
+    // A request job delivered again after a crash before its settlement returns
+    // the record without a second submit.
     h.clock.advance(Duration::from_secs(60));
-    requests.submit(&id(3), &rerun).await.unwrap();
-    let report = daemon.apply_requests().await.unwrap();
-    assert!(report.applied.is_empty());
-    assert!(requests.list().await.unwrap().is_empty());
-    let bytes = h
-        .queue
-        .view()
-        .kv_get(&request_key(&id(3)))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(swale::RequestRecord::from_bytes(&bytes).unwrap(), recorded);
+    assert_eq!(
+        scheduler.handle_request(&id(3), &rerun).await.unwrap(),
+        recorded
+    );
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
         h.wait_for_extract("20260915", RecordStatus::Succeeded)
@@ -513,20 +523,14 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
     );
 
     // A rerun of the succeeded node is admitted at the next count.
-    requests.submit(&id(4), &rerun).await.unwrap();
-    let report = daemon.apply_requests().await.unwrap();
     assert_eq!(
-        report.applied,
-        [(
-            id(4),
-            RequestOutcome::Rerun {
-                run_id: "orders-20260915-extract-r2".into()
-            }
-        )]
+        h.request(&id(4), &rerun).await,
+        RequestOutcome::Rerun {
+            run_id: "orders-20260915-extract-r2".into()
+        }
     );
 
-    // A refused request has its reason in the record. An object that is not
-    // a request is removed without a record.
+    // A refused request has its reason in the record.
     let refused = [
         (
             id(5),
@@ -551,25 +555,13 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
             },
         ),
     ];
+    let mut reasons = Vec::new();
     for (id, request) in &refused {
-        requests.submit(id, request).await.unwrap();
-    }
-    h.objects
-        .put(
-            &ObjectPath::from("requests/not-a-request"),
-            b"nope".to_vec().into(),
-        )
-        .await
-        .unwrap();
-    let report = daemon.apply_requests().await.unwrap();
-    let reasons: Vec<String> = report
-        .applied
-        .iter()
-        .map(|(_, outcome)| match outcome {
-            RequestOutcome::Refused { reason } => reason.clone(),
+        match h.request(id, request).await {
+            RequestOutcome::Refused { reason } => reasons.push(reason),
             other => panic!("{other:?}"),
-        })
-        .collect();
+        }
+    }
     assert_eq!(
         reasons,
         [
@@ -578,48 +570,58 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
             "graph `orders` does not have an active run for partition `20260901`",
         ]
     );
-    assert!(requests.list().await.unwrap().is_empty());
-    assert!(
-        h.queue
-            .view()
-            .kv_get(b"swale/requests/not-a-request")
-            .await
-            .unwrap()
-            .is_none()
-    );
 
-    // A cancel request in the same pass as the start of its graph run
-    // cancels the run.
-    requests
-        .submit(
-            &id(8),
-            &Request::Start {
-                graph: "orders".into(),
-                partitions: vec![partition("20260918")],
-            },
-        )
+    // A request job whose payload is not a request is dead-lettered, and the
+    // inbox rejects an entry that does not decode.
+    let entry = EnqueueEntry {
+        payload: b"nope".to_vec(),
+        options: EnqueueOptions {
+            id_override: Some(id(10).to_string()),
+            ..EnqueueOptions::default()
+        },
+    };
+    h.inbox()
+        .send_with_id(REQUESTS_QUEUE, id(10).as_str(), entry)
         .await
         .unwrap();
-    requests
-        .submit(
-            &id(9),
-            &Request::Cancel {
-                graph: "orders".into(),
-                partition: partition("20260918"),
-            },
-        )
+    let path = format!(
+        "{}/v1/{REQUESTS_QUEUE}/enqueue/{}.{}",
+        default_inbox_path(common::QUEUE_PATH),
+        ulid::Ulid::new(),
+        id(11)
+    );
+    h.objects
+        .put(&ObjectPath::from(path), b"nope".to_vec().into())
         .await
         .unwrap();
-    let report = daemon.apply_requests().await.unwrap();
-    assert_eq!(report.applied[1], (id(9), RequestOutcome::Cancelled));
+    h.queue.apply_inbox_now().await.unwrap();
+
+    // With the pools stopped, the root node of a started graph run stays in the
+    // queue. A cancel request sent after the start cancels the run.
+    pool_stop.cancel();
+    for handle in pool_handles {
+        let _ = handle.wait().await;
+    }
+    let start = Request::Start {
+        graph: "orders".into(),
+        partitions: vec![partition("20260918")],
+    };
+    let cancel = Request::Cancel {
+        graph: "orders".into(),
+        partition: partition("20260918"),
+    };
+    start.send(&h.inbox(), &id(8)).await.unwrap();
+    cancel.send(&h.inbox(), &id(9)).await.unwrap();
+    h.queue.apply_inbox_now().await.unwrap();
+    assert_eq!(h.outcome(&id(9)).await, RequestOutcome::Cancelled);
     assert_eq!(
         h.graph_run("20260918").await.unwrap().state,
         GraphRunState::Cancelled
     );
 
-    // Another process reads the record through the status reader, once the
-    // writer flushed it.
-    let read = common::wait_until("no reader saw the request record", async || {
+    // Another process reads the state of each request through the status
+    // reader, once the writer flushed it.
+    let states = common::wait_until("no reader saw the request states", async || {
         let reader = StatusReader::open(
             h.objects.clone(),
             "",
@@ -628,17 +630,32 @@ argv = ["sh", "-c", "cat >/dev/null; test -f {} || exit 3; printf '{{}}'"]
         )
         .await
         .unwrap();
-        let record = reader.request(&id(3)).await.unwrap();
+        let mut states = Vec::new();
+        for n in [3, 10, 11] {
+            states.push(reader.request(&id(n)).await.unwrap());
+        }
         reader.close().await.unwrap();
-        record
+        let waiting = |state: &RequestState| matches!(state, RequestState::Waiting { .. });
+        (!states.iter().any(waiting)).then_some(states)
     })
     .await;
-    assert_eq!(read, recorded);
+    assert_eq!(states[0], RequestState::Applied(recorded));
+    assert!(
+        matches!(&states[1], RequestState::Failed(error) if error.starts_with("the payload is not a request")),
+        "{:?}",
+        states[1]
+    );
+    assert!(
+        matches!(
+            &states[2],
+            RequestState::Rejected(Rejection::Malformed { .. })
+        ),
+        "{:?}",
+        states[2]
+    );
 
     stop.cancel();
-    for handle in pool_handles {
-        let _ = handle.wait().await;
-    }
+    scheduler_handle.wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -656,16 +673,8 @@ async fn a_retention_pass_removes_the_records_of_settled_runs_and_of_requests_pa
     let (daemon, scheduler, pools) = h.daemon();
     let stop = CancellationToken::new();
     let pool_handles = pools.spawn(&stop);
-    let scheduler_handle = scheduler.clone().spawn(
-        SchedulerOptions {
-            concurrency: 2,
-            poll_interval: Duration::from_millis(10),
-            reconcile_interval: Duration::from_secs(3600),
-        },
-        stop.clone().cancelled_owned(),
-    );
+    let scheduler_handle = h.spawn_scheduler(&scheduler, &stop);
     daemon.sync().await.unwrap();
-    let requests = h.requests();
     let partition = |key: &str| Partition::new(key).unwrap();
     let id = |n: u64| RequestId::new(format!("req-{n}")).unwrap();
     let start = |keys: &[&str]| Request::Start {
@@ -702,11 +711,7 @@ async fn a_retention_pass_removes_the_records_of_settled_runs_and_of_requests_pa
 
     // Two runs settle at the time of the pass that started them, and each
     // settle and each request has an index entry at its time.
-    requests
-        .submit(&id(1), &start(&["20260910", "20260911"]))
-        .await
-        .unwrap();
-    daemon.apply_requests().await.unwrap();
+    h.request(&id(1), &start(&["20260910", "20260911"])).await;
     for key in ["20260910", "20260911"] {
         h.wait_for_complete(key).await;
         assert_eq!(h.graph_run(key).await.unwrap().settled_at_ms, Some(t0));
@@ -720,32 +725,18 @@ async fn a_retention_pass_removes_the_records_of_settled_runs_and_of_requests_pa
         ]
     );
     h.clock.advance(Duration::from_secs(30 * 86_400));
-    requests
-        .submit(&id(2), &start(&["20260912"]))
-        .await
-        .unwrap();
-    daemon.apply_requests().await.unwrap();
+    h.request(&id(2), &start(&["20260912"])).await;
     h.wait_for_complete("20260912").await;
 
-    // A rerun returns the run to the active state without a settle time and
-    // leaves the entry of the first settle. The settle after it records the new
-    // time with a second entry.
+    // A rerun leaves the entry of the first settle, and the settle after it
+    // records the new time with a second entry.
     h.clock.advance(Duration::from_secs(30 * 86_400));
-    requests
-        .submit(
-            &id(3),
-            &Request::Rerun {
-                graph: "orders".into(),
-                partition: partition("20260912"),
-                node: "extract".into(),
-            },
-        )
-        .await
-        .unwrap();
-    daemon.apply_requests().await.unwrap();
-    let run = h.graph_run("20260912").await.unwrap();
-    assert_eq!(run.state, GraphRunState::Active);
-    assert_eq!(run.settled_at_ms, None);
+    let rerun = Request::Rerun {
+        graph: "orders".into(),
+        partition: partition("20260912"),
+        node: "extract".into(),
+    };
+    h.request(&id(3), &rerun).await;
     h.wait_for_complete("20260912").await;
     assert_eq!(
         h.graph_run("20260912").await.unwrap().settled_at_ms,
@@ -809,19 +800,11 @@ async fn a_retention_pass_removes_the_records_of_settled_runs_and_of_requests_pa
     );
 
     // A start of a partition whose records were removed runs the graph again.
-    requests
-        .submit(&id(4), &start(&["20260910"]))
-        .await
-        .unwrap();
-    let report = daemon.apply_requests().await.unwrap();
     assert_eq!(
-        report.applied,
-        [(
-            id(4),
-            RequestOutcome::Started {
-                partitions: vec![partition("20260910")]
-            }
-        )]
+        h.request(&id(4), &start(&["20260910"])).await,
+        RequestOutcome::Started {
+            partitions: vec![partition("20260910")]
+        }
     );
     h.wait_for_complete("20260910").await;
     assert_eq!(
@@ -836,7 +819,7 @@ async fn a_retention_pass_removes_the_records_of_settled_runs_and_of_requests_pa
     }
     scheduler_handle.wait().await.unwrap();
 
-    // The daemon loop runs the pass after its request pass, and a process start
+    // The daemon loop runs the pass after its sync pass, and a process start
     // reads the index once.
     h.clock.advance(Duration::from_secs(3600));
     let (stop, handle) = h.spawn_with_retention(Duration::from_secs(3600));
