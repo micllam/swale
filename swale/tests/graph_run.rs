@@ -477,9 +477,17 @@ async fn the_reconciler_submits_ready_nodes_and_settles_the_run_without_events()
     h.queue.kv_put(&key, &cancelled.to_bytes()).await.unwrap();
     assert_eq!(h.scheduler.reconcile().await.unwrap().cancelled, 1);
     assert_eq!(h.scheduler.reconcile().await.unwrap().cancelled, 0);
-    // The record commits with the cancellation, without a worker.
-    let transform = h.record("swale/assets/orders_clean/20260915").await;
-    assert_eq!(transform.unwrap().status, RecordStatus::Cancelled);
+    // The record commits with the cancellation and its reason, without a
+    // worker.
+    let transform = h
+        .record("swale/assets/orders_clean/20260915")
+        .await
+        .unwrap();
+    assert_eq!(transform.status, RecordStatus::Cancelled);
+    assert_eq!(
+        transform.error.as_deref(),
+        Some("the graph run is cancelled")
+    );
 
     // The run is active again. Every node is recorded or waiting, so the
     // pass writes the final state.

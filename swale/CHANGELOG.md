@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a rejected inbox entry and a dead-lettered request job, and `--wait` fails
   with the reason of either. Match `RequestState::Applied` where the code tested
   for `Some`.
+- The record of a task instance that a cancel of its graph run ended has the
+  error `the graph run is cancelled`, in place of the `None` of 0.2.0. A reader
+  that tests the error for a failure must also test the status.
 
 ### Removed
 

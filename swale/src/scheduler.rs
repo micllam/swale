@@ -64,6 +64,9 @@ use crate::task::{self, HEADER_GRAPH, TaskIdentity};
 /// The queue of the triggers.
 pub const TRIGGERS_QUEUE: &str = "swale-triggers";
 
+/// The reason of the cancel of a task instance whose graph run is cancelled.
+const GRAPH_RUN_CANCELLED: &str = "the graph run is cancelled";
+
 /// A failure of the scheduler.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -836,7 +839,8 @@ impl Scheduler {
             let Some(runtime) = self.pools.runtime(node.pool()) else {
                 continue;
             };
-            if runtime.cancel(&run_id, None).await? != CancelRunOutcome::NotActive {
+            let reason = Some(GRAPH_RUN_CANCELLED.to_string());
+            if runtime.cancel(&run_id, reason).await? != CancelRunOutcome::NotActive {
                 cancelled += 1;
             }
         }
