@@ -1,9 +1,9 @@
-# A graph of two shell nodes that runs anywhere `sh` exists:
+# A graph of three shell nodes that runs anywhere `sh` exists:
 #
 #     swale run examples/local.toml --store ./swale-store
 #
-# `first` prints an output, and `second` receives it through a template.
-# `third` is a mapped node: it runs its command once per item of `each`.
+# `first` prints an output, and `second` receives it through a template. `third`
+# is a mapped node: it runs its command once per item of `each`.
 
 [graph]
 name = "local"
