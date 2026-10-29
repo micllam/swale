@@ -8,11 +8,11 @@
 A scheduled, dependency-ordered orchestrator of asset graphs. The deployment
 consists of a single binary and a single bucket.
 
-swale runs on the [taquba](https://github.com/micllam/taquba) durable
-execution crates. Every task instance runs as a single workflow run, and the
-record of its outcome and the event for the scheduler commit in one transaction.
-The [`swale`](swale/) crate is the library and the binary, and its README
-documents the API and the command in full.
+swale runs on the [taquba](https://github.com/micllam/taquba) durable execution
+crates. Every task instance runs as a single workflow run, and the record of its
+outcome and the event for the scheduler commit in one transaction. The
+[`swale`](swale/) crate is the library and the binary, and its README documents
+the API and the command in full.
 
 ## Definition file
 
@@ -46,11 +46,15 @@ url = "https://warehouse.example/load"
 body = '{"table": "{{ upstream.extract.table }}"}'
 ```
 
-The built-in operators are `subprocess`, which runs a program with a JSON
-document on stdin, `shell`, which runs a command line with `sh -c`, `http`,
-which sends one request, and `object_exists`, which waits for an object at a
-store URL. The output of a node is the JSON it prints or receives, and a
-downstream node refers to it as `{{ upstream.<node>.<path> }}`.
+swale has four built-in operators:
+
+- `subprocess` runs a program with a JSON document on stdin.
+- `shell` runs a command line with `sh -c`.
+- `http` sends one request.
+- `object_exists` waits for an object at a store URL.
+
+The output of a node is the JSON it prints or receives, and a downstream node
+refers to it as `{{ upstream.<node>.<path> }}`.
 
 ## Command
 
@@ -59,8 +63,8 @@ downstream node refers to it as `{{ upstream.<node>.<path> }}`.
 store URL (`s3://`, `gs://`, `az://`), and resumes an existing graph run.
 
 `swale publish` writes a definition to the store, and `swale daemon` runs the
-published graphs: it fires each schedule, catches up a new graph and replays
-the firings missed during downtime.
+published graphs: it fires each schedule, catches up a new graph and replays the
+firings missed during downtime.
 
 ```console
 $ cargo install swale
