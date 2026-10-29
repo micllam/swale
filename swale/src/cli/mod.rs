@@ -130,8 +130,8 @@ enum Command {
         partition: Option<Partition>,
         #[command(flatten)]
         store: StoreArg,
-        /// The first partition listed. Without it, the listing starts at the
-        /// first graph run of the graph.
+        /// The lower bound of the partitions listed. Without it, the listing
+        /// takes the latest partitions of the graph.
         #[arg(long, value_parser = parse_partition_arg)]
         from: Option<Partition>,
         /// The graph runs listed, the latest partitions at or after `from`.
