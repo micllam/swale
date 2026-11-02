@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+
 # Supersede an in-flight run when a newer commit arrives on the same ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
