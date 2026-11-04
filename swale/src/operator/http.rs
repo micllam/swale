@@ -38,7 +38,6 @@ pub struct HttpParams {
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     /// The request body.
-    #[serde(default)]
     pub body: Option<String>,
     /// The time the whole request can take, `60s` by default.
     #[serde(
