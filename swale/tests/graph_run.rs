@@ -12,7 +12,7 @@ use swale::JsonBytes;
 use swale::records::{GraphRunRecord, GraphRunState, NodeRecord, RecordStatus, graph_run_key};
 use swale::scheduler::ReconcileReport;
 use swale::{
-    DefinitionStore, OperatorSet, Partition, Pools, RecordHook, RerunOutcome, Scheduler,
+    DefinitionStore, Event, OperatorSet, Partition, Pools, RecordHook, RerunOutcome, Scheduler,
     SchedulerOptions,
 };
 use taquba::{KvOrder, MockClock, Queue};
@@ -388,7 +388,9 @@ async fn a_rerun_of_a_succeeded_node_runs_its_downstreams_again() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cancelled_graph_run_submits_no_further_node() {
-    let h = Harness::start(&definition_text(TRANSFORM_OK), true).await;
+    // No worker runs, so the test hands the event of `extract` to the
+    // scheduler.
+    let h = Harness::start(&definition_text(TRANSFORM_OK), false).await;
     h.scheduler
         .start_run(&h.hash, &Harness::partition())
         .await
@@ -409,22 +411,31 @@ async fn a_cancelled_graph_run_submits_no_further_node() {
     assert_eq!(run.state, GraphRunState::Cancelled);
     assert_eq!(run.settled_at_ms, Some(1_700_000_000_000));
 
-    // Regardless of how `extract` ended, the scheduler ignores its event, and
-    // `load` is never submitted.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        h.record("swale/assets/orders_warehouse/20260915")
-            .await
-            .is_none()
-    );
-    let load = h
-        .pools
-        .runtime("warehouse")
-        .unwrap()
-        .status(&"orders-20260915-load-r0".parse().unwrap())
+    // A success of `extract` after the cancel makes `transform` ready, and the
+    // scheduler ignores the event of `extract`.
+    h.write_record(
+        "swale/assets/orders_raw/20260915",
+        RecordStatus::Succeeded,
+        Some(serde_json::json!({"rows": 3})),
+    )
+    .await;
+    h.scheduler
+        .handle_event(&Event {
+            graph: "orders".into(),
+            partition: Harness::partition(),
+            node: "extract".into(),
+            status: RecordStatus::Succeeded,
+        })
         .await
         .unwrap();
-    assert!(load.is_none(), "{load:?}");
+    let transform = h
+        .pools
+        .runtime("default")
+        .unwrap()
+        .status(&"orders-20260915-transform-r0".parse().unwrap())
+        .await
+        .unwrap();
+    assert!(transform.is_none(), "{transform:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
