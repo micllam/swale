@@ -29,14 +29,14 @@ pub struct TaskInput {
     /// The status of each upstream node with a record.
     pub upstreams: BTreeMap<String, UpstreamSummary>,
     /// The state of the previous step of the run. `None` on the first step.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<Value>,
     /// The template of the items of a mapped node. `None` for a node that runs
     /// once and for a member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub each: Option<String>,
     /// The item of a member of a mapped node. `None` for every other run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub item: Option<Value>,
 }
 
@@ -58,7 +58,7 @@ pub struct UpstreamSummary {
     /// The status.
     pub status: RecordStatus,
     /// The error of a failed or cancelled run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 

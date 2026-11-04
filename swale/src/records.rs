@@ -202,13 +202,13 @@ pub struct NodeRecord {
     pub terminated_at_ms: u64,
     /// The output of a succeeded run, when the record stays within the KV value
     /// cap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<serde_json::Value>,
     /// Whether the output was omitted because the record exceeded the cap.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub output_omitted: bool,
     /// The error of a failed or cancelled run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -257,7 +257,7 @@ pub struct GraphRunRecord {
     /// epoch. `None` while the run is active. The expiry index entry of the run
     /// has the same time, and the retention pass removes the records of the run
     /// once the time is a retention window in the past.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_at_ms: Option<u64>,
     /// The rerun count each listed node must reach for its record to be
     /// current, by node name. A rerun of a succeeded node lists the node and
