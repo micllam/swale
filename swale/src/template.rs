@@ -206,7 +206,10 @@ impl Template {
 
 /// The value at `path` into `value`: a key of an object or an index of an array
 /// at each part.
-fn lookup<'a>(value: &'a serde_json::Value, path: &[String]) -> Option<&'a serde_json::Value> {
+pub(crate) fn lookup<'a>(
+    value: &'a serde_json::Value,
+    path: &[String],
+) -> Option<&'a serde_json::Value> {
     path.iter().try_fold(value, |value, key| match value {
         serde_json::Value::Object(map) => map.get(key),
         serde_json::Value::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),

@@ -619,6 +619,91 @@ command = "printf '{{\"size\": {{{{ upstream.arrival.size }}}}}}'"
     assert_eq!(load.output, Some(serde_json::json!({"size": 5})));
 }
 
+/// A server that sends `responses` in order, one per connection. It returns its
+/// URL and a handle that ends after the last response.
+async fn serve_in_order(
+    responses: Vec<(u16, &'static str)>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/batch", listener.local_addr().unwrap());
+    let handle = tokio::spawn(async move {
+        for (status, body) in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let n = socket.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..n]);
+            }
+            let response = format!(
+                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        }
+    });
+    (url, handle)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_poll_of_an_http_node_runs_with_the_retries_of_the_node() {
+    // Two transient errors exceed `retries = 1` unless the attempts count per
+    // poll.
+    let (url, server) = serve_in_order(vec![
+        (503, "busy"),
+        (200, r#"{"state": "in_progress"}"#),
+        (503, "busy"),
+        (200, r#"{"state": "ended"}"#),
+    ])
+    .await;
+    let text = format!(
+        r#"
+[graph]
+name = "orders"
+partition = "daily"
+
+[[node]]
+name = "wait"
+produces = "batch"
+operator = "http"
+retries = 1
+[node.params]
+url = "{url}"
+[node.params.poll]
+path = "state"
+done = ["ended"]
+interval = "1m"
+timeout = "1h"
+"#
+    );
+    let h = Harness::start(&text, true).await;
+    h.scheduler
+        .start_run(&h.hash, &Harness::partition())
+        .await
+        .unwrap();
+
+    let runtime = h.pools.runtime("default").unwrap();
+    let run_id: RunId = "orders-20260915-wait-r0".parse().unwrap();
+    common::wait_until("the first poll never ended", async || {
+        runtime
+            .status(&run_id)
+            .await
+            .unwrap()
+            .filter(|status| status.step.number >= 1)
+    })
+    .await;
+    h.clock.advance(Duration::from_secs(61));
+    h.wait_for_state(GraphRunState::Complete).await;
+    let wait = h.record("swale/assets/batch/20260915").await.unwrap();
+    assert_eq!(
+        wait.output,
+        Some(serde_json::json!({"status": 200, "body": {"state": "ended"}}))
+    );
+    server.await.unwrap();
+}
+
 /// A graph with the mapped node `fetch` over the output of `list`, whose shell
 /// commands are `list` and `fetch`.
 fn mapped_definition_text(list: &str, fetch: &str) -> String {

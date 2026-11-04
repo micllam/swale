@@ -61,6 +61,16 @@ fn example_graph_loads_with_the_documented_structure() {
 }
 
 #[test]
+fn batch_example_loads_as_a_chain_of_submit_wait_and_collect() {
+    let graph =
+        swale::load_path(Path::new("examples/batch.toml"), &OperatorSet::builtin()).unwrap();
+    assert_eq!(graph.name(), "batch_daily");
+    let order: Vec<&str> = graph.nodes().iter().map(|n| n.name()).collect();
+    assert_eq!(order, ["submit", "wait", "collect"]);
+    assert_eq!(graph.edge_count(), 2);
+}
+
+#[test]
 fn validate_command_reports_a_valid_definition_with_status_0() {
     let output = swale(&["validate", EXAMPLE], None);
     assert_eq!(output.status.code(), Some(0));

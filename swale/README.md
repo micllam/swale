@@ -77,6 +77,21 @@ reference is an environment variable of the daemon.
   polls, and the output is the URL, the size and the last-modified time of the
   object.
 
+With a `poll` table, the `http` operator sends its request again every
+`interval` until the value at `path` in the JSON body is one of `done`. No
+worker is held between polls, and the last response is the output. Each poll
+runs with the `retries` of the node. The task instance fails at a value of
+`failed` or once `timeout` has passed after the first poll.
+`examples/batch.toml` polls a provider batch job:
+
+```toml
+[node.params.poll]
+path = "processing_status"
+done = ["ended"]
+interval = "10m"
+timeout = "25h"
+```
+
 The `subprocess` and `shell` operators kill a program when its run time exceeds
 the `timeout` parameter. A program or a request must be idempotent per attempt.
 

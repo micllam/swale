@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- With the optional `poll` table, the `http` operator repeats its request until
+  a value of the JSON body ends the wait, without a held worker. A struct
+  literal of `HttpParams` must set `poll`.
+
 ## [0.3.0] - 2026-11-02
 
 ### Added

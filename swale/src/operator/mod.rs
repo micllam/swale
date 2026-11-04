@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use taquba_workflow::{Step, StepError};
 
@@ -233,6 +234,43 @@ pub(crate) async fn keep_lease(step: &Step, lease: Lease) -> StepError {
         ticks.tick().await;
         if let Err(e) = step.lease.ensure_at_least(lease.extension) {
             return StepError::transient(format!("lease extension failed: {e}"));
+        }
+    }
+}
+
+/// The state of an operator that polls until a deadline, between its polls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Deadline {
+    /// The time at which the wait fails, in milliseconds from the Unix epoch.
+    deadline_ms: u64,
+}
+
+impl Deadline {
+    /// The deadline in the state of `task`, or `timeout` after the start of the
+    /// first poll.
+    pub(crate) fn of(task: &Task<'_>, timeout: Duration) -> Result<Self, StepError> {
+        match task.state {
+            Some(state) => serde_json::from_value(state.clone())
+                .map_err(|e| StepError::permanent(format!("the state is not a deadline: {e}"))),
+            None => Ok(Deadline {
+                deadline_ms: task
+                    .now_ms
+                    .saturating_add(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+            }),
+        }
+    }
+
+    /// Whether the deadline has passed at the start of `task`.
+    pub(crate) fn passed(&self, task: &Task<'_>) -> bool {
+        task.now_ms >= self.deadline_ms
+    }
+
+    /// The outcome of a poll before the deadline: the next poll after
+    /// `interval`.
+    pub(crate) fn poll_after(&self, interval: Duration) -> Outcome {
+        Outcome::Continue {
+            state: serde_json::to_value(self).expect("a deadline serializes"),
+            after: interval,
         }
     }
 }

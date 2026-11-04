@@ -1,0 +1,43 @@
+# A daily job of the Message Batches API of Anthropic. `submit` creates a batch,
+# `wait` polls it until it has ended, and `collect` copies its results to a
+# bucket. The daemon requires `ANTHROPIC_API_KEY` in its environment, and
+# `collect` requires `curl` and the `aws` command.
+#
+# A crash during `submit` can create a second batch, because the create request
+# of the API does not take an idempotency key.
+
+[graph]
+name = "batch_daily"
+schedule = "0 3 * * *"
+partition = "daily"
+
+[[node]]
+name = "submit"
+operator = "http"
+[node.params]
+method = "POST"
+url = "https://api.anthropic.com/v1/messages/batches"
+headers = { "Content-Type" = "application/json", "x-api-key" = "{{ env.ANTHROPIC_API_KEY }}", "anthropic-version" = "2026-10-21" }
+body = '{"requests": [{"custom_id": "summary_{{ partition }}", "params": {"model": "claude-haiku-5-5", "max_tokens": 1024, "messages": [{"role": "user", "content": "Summarise the support tickets of {{ partition }}."}]}}]}'
+
+[[node]]
+name = "wait"
+after = ["submit"]
+operator = "http"
+retries = 3
+[node.params]
+url = "https://api.anthropic.com/v1/messages/batches/{{ upstream.submit.body.id }}"
+headers = { "x-api-key" = "{{ env.ANTHROPIC_API_KEY }}", "anthropic-version" = "2026-10-21" }
+[node.params.poll]
+path = "processing_status"
+done = ["ended"]
+interval = "10m"
+timeout = "25h"
+
+[[node]]
+name = "collect"
+after = ["wait"]
+operator = "shell"
+[node.params]
+command = "curl -sSf -H \"x-api-key: $ANTHROPIC_API_KEY\" -H 'anthropic-version: 2026-10-21' '{{ upstream.wait.body.results_url }}' | aws s3 cp - 's3://results/batches/{{ partition }}.jsonl' >&2 && printf '{\"url\": \"s3://results/batches/{{ partition }}.jsonl\", \"counts\": {{ upstream.wait.body.request_counts }}}'"
+timeout = "30m"

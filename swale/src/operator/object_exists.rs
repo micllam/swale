@@ -13,12 +13,12 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use taquba::object_store::path::Path as ObjectPath;
 use taquba::object_store::{self, ObjectStore, ObjectStoreExt, ObjectStoreScheme};
 use taquba_workflow::StepError;
 
-use super::{Operator, Outcome, Task};
+use super::{Deadline, Operator, Outcome, Task};
 use crate::duration;
 
 /// Parameters of the `object_exists` operator.
@@ -83,27 +83,11 @@ impl ObjectExists {
     }
 }
 
-/// The state between polls.
-#[derive(Debug, Serialize, Deserialize)]
-struct State {
-    /// The time at which the wait fails, in milliseconds from the Unix epoch.
-    deadline_ms: u64,
-}
-
 impl Operator for ObjectExists {
     type Params = ObjectExistsParams;
 
     async fn run(&self, task: &Task<'_>, params: ObjectExistsParams) -> Result<Outcome, StepError> {
-        let deadline_ms = match task.state {
-            Some(state) => {
-                serde_json::from_value::<State>(state.clone())
-                    .map_err(|e| StepError::permanent(format!("the state is not a deadline: {e}")))?
-                    .deadline_ms
-            }
-            None => task
-                .now_ms
-                .saturating_add(u64::try_from(params.timeout.as_millis()).unwrap_or(u64::MAX)),
-        };
+        let deadline = Deadline::of(task, params.timeout)?;
         let url = url::Url::parse(&params.url)
             .map_err(|e| StepError::permanent(format!("`{}` is not a URL: {e}", params.url)))?;
         let (store, path) = self.open(&url)?;
@@ -115,16 +99,13 @@ impl Operator for ObjectExists {
                     .last_modified
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             }))),
-            Err(object_store::Error::NotFound { .. }) if task.now_ms >= deadline_ms => {
+            Err(object_store::Error::NotFound { .. }) if deadline.passed(task) => {
                 Ok(Outcome::Failed(format!(
                     "no object at `{}` within {:?}",
                     params.url, params.timeout
                 )))
             }
-            Err(object_store::Error::NotFound { .. }) => Ok(Outcome::Continue {
-                state: serde_json::to_value(State { deadline_ms }).expect("a state serializes"),
-                after: params.interval,
-            }),
+            Err(object_store::Error::NotFound { .. }) => Ok(deadline.poll_after(params.interval)),
             Err(e) => Err(StepError::transient(format!(
                 "the head of `{}` failed: {e}",
                 params.url
